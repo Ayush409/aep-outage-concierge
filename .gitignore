@@ -1,0 +1,13 @@
+/data/extracted/
+/.venv/
+/data/processed/*
+/backend/*.db
+/backend/cache/
+.env
+node_modules/
+/frontend/dist/
+__pycache__/
+# extracted copies of the zips (too large for GitHub; unzip per data/README.md)
+/data/raw/Data1/
+/data/raw/Data2/
+/data/raw/matched_upstream/
