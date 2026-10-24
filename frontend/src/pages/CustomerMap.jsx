@@ -4,7 +4,7 @@ import { BAND_RGB, fmt, qs } from "../api.js";
 import { useApp } from "../App.jsx";
 import MapView, { squarePolygon } from "../components/MapView.jsx";
 import { nowIndex, sample, weatherLayer } from "../components/weather.js";
-import { Band, BandLegend, WeatherControls, useFetch } from "../components/ui.jsx";
+import { Band, BandLegend, bandOutcomeText, WeatherControls, useFetch } from "../components/ui.jsx";
 
 export default function CustomerMap() {
   const { scenario } = useApp();
@@ -60,7 +60,8 @@ export default function CustomerMap() {
   function tooltip({ object, layer: l, coordinate }) {
     if (!object && !coordinate) return null;
     if (l?.id === "risk") {
-      return { html: `<b>${object.band} risk</b> (~${fmt.pct(object.p_out)} of customers)<br/>` +
+      const seen = bandOutcomeText(object.observed);
+      return { html: `<b>${object.band} risk</b>${seen ? `<br/><span class="muted">${seen}</span>` : ""}<br/>` +
         `${object.factors.join("<br/>") || "No strong weather drivers"}`, className: "tooltip" };
     }
     if (l?.id === "out") return { html: `<b>${fmt.n(object.out)} customers out</b> in this area`, className: "tooltip" };

@@ -12,6 +12,8 @@ const TERRAIN = {
   attribution: "Terrain: Mapzen / AWS Open Data",
 };
 export const CENTER = [-79.95, 37.24];
+// Roanoke service area (extent of the challenge data plus a margin); panning/zooming stays inside it
+export const MAX_BOUNDS = [[-80.65, 36.75], [-79.25, 37.75]];
 
 /** MapLibre basemap + deck.gl overlay. Layers update without recreating the map. */
 export default function MapView({ layers, getTooltip, terrain = false, pitch = 0, bearing = 0, zoom = 10.2,
@@ -22,7 +24,7 @@ export default function MapView({ layers, getTooltip, terrain = false, pitch = 0
 
   useEffect(() => {
     const m = new maplibregl.Map({
-      container: el.current, style: STYLE, center, zoom, pitch, bearing, maxPitch: 75,
+      container: el.current, style: STYLE, center, zoom, pitch, bearing, maxPitch: 75, maxBounds: MAX_BOUNDS,
       attributionControl: { compact: true },
     });
     m.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");

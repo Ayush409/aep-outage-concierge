@@ -5,6 +5,7 @@ Writes to data/processed/weather/:
   event_<id>.json     full hourly fields for each scenario window (transposed events are fetched
                       at their real location and re-centred on Roanoke)
   tornado_2011.json   SPC tracks for 27 Apr 2011, shifted onto the service area
+  elevation.json      elevation of every grid cell and weather point
 
 Run:  .venv/Scripts/python scripts/fetch_weather.py
 """
@@ -106,6 +107,31 @@ def fetch_event(eid, ev):
     time.sleep(10)
 
 
+def fetch_elevation():
+    """Elevation (m) of every grid cell centre and weather point (Open-Meteo elevation API, 90 m DEM).
+
+    Used to correct each cell's temperature for freezing rain (engines/weather.py).
+    """
+    import pandas as pd
+
+    cells = pd.read_pickle(PROCESSED / "cells.pkl")
+
+    def elev(lons, lats):
+        out = []
+        for i in range(0, len(lons), 100):
+            r = httpx.get("https://api.open-meteo.com/v1/elevation", timeout=60, params=dict(
+                latitude=",".join(f"{x:.4f}" for x in lats[i:i + 100]),
+                longitude=",".join(f"{x:.4f}" for x in lons[i:i + 100])))
+            r.raise_for_status()
+            out += r.json()["elevation"]
+        return out
+
+    ce = elev(cells.lon.tolist(), cells.lat.tolist())
+    pe = elev([p[0] for p in GRID], [p[1] for p in GRID])
+    (OUT / "elevation.json").write_text(json.dumps(dict(cells=dict(zip(map(str, cells.index), ce)), points=pe)))
+    print("elevation", len(ce), "cells", len(pe), "points")
+
+
 def fetch_tornado_tracks():
     path = OUT / "tornado_2011.json"
     if path.exists():
@@ -131,6 +157,7 @@ def fetch_tornado_tracks():
 
 
 if __name__ == "__main__":
+    fetch_elevation()
     fetch_tornado_tracks()
     for eid, ev in EVENTS.items():
         fetch_event(eid, ev)

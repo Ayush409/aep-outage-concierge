@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, BAND_COLOR, BANDS, qs } from "../api.js";
+import { api, BAND_COLOR, BANDS, fmt, qs } from "../api.js";
+import { useApp } from "../App.jsx";
 import { LAYERS, rampCss } from "./weather.js";
 
 export function Band({ band, big }) {
@@ -10,15 +11,25 @@ export function Band({ band, big }) {
   );
 }
 
+/** "In N past storms, about X% of homes in this band lost power" - what the band has meant in practice. */
+export function bandOutcomeText(o) {
+  if (!o) return null;
+  return `In ${o.storms} past storm${o.storms === 1 ? "" : "s"}, about ${fmt.pct(o.share)} of homes in this band lost power`;
+}
+
 export function BandLegend() {
+  const { bandOutcomes } = useApp();
   return (
-    <div className="row small" aria-label="Risk bands">
-      {BANDS.map((b, i) => (
-        <span key={b} className="row" style={{ gap: 4 }}>
-          <i style={{ width: 10, height: 10, borderRadius: 3, background: BAND_COLOR[b], display: "inline-block" }} />
-          {b} <span className="muted">{["1-15%", "15-35%", "35-60%", "60-100%"][i]}</span>
-        </span>
-      ))}
+    <div className="stack" style={{ gap: 4 }}>
+      <div className="row small" aria-label="Risk bands">
+        {BANDS.map((b) => (
+          <span key={b} className="row" style={{ gap: 4 }} title={bandOutcomeText(bandOutcomes?.[b]) || undefined}>
+            <i style={{ width: 10, height: 10, borderRadius: 3, background: BAND_COLOR[b], display: "inline-block" }} />
+            {b} {bandOutcomes?.[b] && <span className="muted">~{fmt.pct(bandOutcomes[b].share)}</span>}
+          </span>
+        ))}
+      </div>
+      <div className="small muted">% = homes in that band that lost power in past storms</div>
     </div>
   );
 }

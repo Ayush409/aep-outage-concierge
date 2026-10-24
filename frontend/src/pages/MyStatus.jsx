@@ -27,8 +27,11 @@ export default function MyStatus() {
           <div className="row">
             <Band band={s.risk.band} big />
             <div>
-              <div className="stat"><div className="v">{fmt.pct(s.risk.p_out)}</div>
-                <div className="l">chance your home loses power in this event</div></div>
+              {s.risk.observed && (
+                <div className="stat"><div className="v">{fmt.pct(s.risk.observed.share)}</div>
+                  <div className="l">of homes in this band lost power in {s.risk.observed.storms} past
+                    storm{s.risk.observed.storms === 1 ? "" : "s"}</div></div>
+              )}
             </div>
           </div>
           <div className="secondary">{s.communications.explanation}</div>

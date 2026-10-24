@@ -31,6 +31,7 @@ export default function App() {
   const [scenarios, setScenarios] = useState([]);
   const [scenario, setScenario] = useState(null);
   const [active, setActive] = useState(null);
+  const [bandOutcomes, setBandOutcomes] = useState({});
 
   const refresh = useCallback(async () => {
     try {
@@ -38,6 +39,7 @@ export default function App() {
       setUser(me);
       const sc = await api("/api/scenarios");
       setScenarios(sc.scenarios);
+      setBandOutcomes(sc.band_outcomes || {});
       setActive(sc.active);
       setScenario((s) => s || sc.active);
     } catch {
@@ -49,7 +51,7 @@ export default function App() {
   if (user === undefined) return <div className="auth"><div className="card">Loading...</div></div>;
 
   const home = user?.role === "aep" ? "/ops" : "/status";
-  const ctx = { user, refresh, scenarios, scenario, setScenario, active, setActive };
+  const ctx = { user, refresh, scenarios, scenario, setScenario, active, setActive, bandOutcomes };
 
   return (
     <Ctx.Provider value={ctx}>

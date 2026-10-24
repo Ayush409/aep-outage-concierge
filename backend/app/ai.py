@@ -22,6 +22,7 @@ Rules:
 - Use ONLY the facts in the JSON you are given. Never invent numbers, times, places, or causes.
 - Plain language a 12-year-old understands. Short sentences. No jargon (say "the fuse that protects your street", not "lateral fuse").
 - Always keep model estimates clearly labelled as estimates, separate from confirmed facts.
+- band_lost_share is the share of homes in this risk band that actually lost power in band_past_storms past storms. Describe it exactly that way; never present it as this home's own chance.
 - If confidence is Low or the cause is unknown, say so honestly and say AEP crews are still working on it.
 - SMS-style messages must be under 300 characters.
 - Never give medical advice beyond "contact your provider or go to a hospital if your equipment needs power"."""
@@ -47,9 +48,11 @@ def _client():
 
 def _fallback_explanation(ctx: dict) -> str:
     f = ", ".join(ctx.get("factors") or []) or "the forecast weather"
-    pct = min(99, max(1, round(100 * ctx["p_out"])))
-    s = (f"Your outage risk is {ctx['band']} (about {pct}% chance in this scenario). "
-         f"The biggest reasons: {f}. ")
+    s = f"Your outage risk is {ctx['band']}. "
+    if ctx.get("band_lost_share") is not None:
+        pct = min(99, max(1, round(100 * ctx["band_lost_share"])))
+        s += f"In {ctx['band_past_storms']} past storms, about {pct}% of homes in this band lost power. "
+    s += f"The biggest reasons: {f}. "
     if ctx.get("estimate_label"):
         s += f"If your power goes out, restoration is {ctx['estimate_label']} (a model estimate). "
     s += f"Confidence: {ctx['confidence']}."
@@ -75,8 +78,9 @@ def _generate(ctx_json: str) -> str:
 
 def communications(ctx: dict) -> dict:
     """Returns {explanation, messages{...}, source: 'claude' | 'template'}."""
-    safe = {k: ctx[k] for k in ("scenario_name", "band", "p_out", "confidence", "factors", "estimate_label",
-                                "cause_plain", "fixed_plain", "delay_reason", "hazard", "declared_needs")
+    safe = {k: ctx[k] for k in ("scenario_name", "band", "band_lost_share", "band_past_storms", "confidence",
+                                "factors", "estimate_label", "cause_plain", "fixed_plain", "delay_reason", "hazard",
+                                "declared_needs")
             if k in ctx}
     try:
         data = json.loads(_generate(json.dumps(safe, sort_keys=True)))

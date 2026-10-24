@@ -33,6 +33,14 @@ HAZARD_EVENTS = {
 HOLDOUTS = {
     "feb_2025": ("2025-02-10", "2025-02-20", ["feb_2025_ice", "feb_2025_wind"]),
     "helene_2024": ("2024-09-25", "2024-10-03", ["helene_2024", "helene_late_reports"]),
+    "winter_2025_01": ("2025-01-04", "2025-01-08", ["winter_storm_2025_01"]),
+}
+# Storms with enough records to calibrate the damage -> outage step: (events, hazard mix)
+OUTAGE_CALIB = {
+    "feb_2025": (["feb_2025_ice", "feb_2025_wind"], "ice"),
+    "helene_2024": (["helene_2024", "helene_late_reports"], "tropical"),
+    "winter_2025_01": (["winter_storm_2025_01"], "ice"),
+    "minor_wind_2025": (["minor_wind_2025"], "wind"),
 }
 
 
@@ -69,7 +77,7 @@ class MonotonePoisson:
 def main():
     g = grid()
     log("building daily features ...")
-    f = risk.cell_day_features(history().daily_features())
+    f = risk.cell_day_features(history())
     f = f.dropna(subset=["gust_max"]).reset_index(drop=True)
     dmg = g.damage.copy()
     dmg["day"] = pd.to_datetime(dmg.report_date)
@@ -124,11 +132,27 @@ def main():
         sel = train_mask & wind_day & wind_ev_day
         return float(f.y.to_numpy()[sel].sum() / max((rate(m, X) * leaf_mult)[sel].sum(), 1e-9))
 
-    mixes = {}
-    for hz, evs in HAZARD_EVENTS.items():
-        sub = dmg[dmg.event.isin(evs)]
-        mixes[hz] = (sub.asset_type.value_counts(normalize=True)).round(4).to_dict()
-    mixes["all"] = dmg.asset_type.value_counts(normalize=True).round(4).to_dict()
+    def hazard_mixes(d):
+        out = {hz: d[d.event.isin(evs)].asset_type.value_counts(normalize=True).round(4).to_dict()
+               for hz, evs in HAZARD_EVENTS.items()}
+        out["all"] = d.asset_type.value_counts(normalize=True).round(4).to_dict()
+        return out
+
+    mixes = hazard_mixes(dmg)
+
+    def outage_step(exclude: list[str]):
+        """Placement table + outage calibration fitted on real damage, leaving out `exclude` events."""
+        d = dmg[~dmg.event.isin(exclude)]
+        mx = hazard_mixes(d)
+        placement = risk.fit_placement(d)
+        events = []
+        for evs, hz in OUTAGE_CALIB.values():
+            if set(evs) & set(exclude):
+                continue
+            sub = d[d.event.isin(evs)]
+            lam = np.bincount(sub.cellpos.astype(int), minlength=ncell).astype(float)
+            events.append((lam, g.premises_out(sub.iso_dev.to_numpy()), mx[hz]))
+        return dict(placement=placement, cluster_size=risk.fit_cluster_size(events, placement)), mx
 
     validation = {}
     for name, (a, b, evs) in HOLDOUTS.items():
@@ -142,8 +166,10 @@ def main():
         act_cell = np.bincount(sub.cellpos, weights=sub.y, minlength=len(g.cells))
         rho = spearmanr(lam_cell, act_cell).statistic
         # premise-level outage: predicted probability vs. downstream of a real damaged device
-        mix = mixes["ice" if name == "feb_2025" else "tropical"]
-        p_out = risk.premise_outage_prob(risk.device_rates(lam_cell, mix))
+        outage, fold_mixes = outage_step(evs)
+        mix = fold_mixes[OUTAGE_CALIB[name][1]]
+        p_out = risk.premise_outage_prob(risk.device_rates(lam_cell, mix, placement=outage["placement"]),
+                                         outage["cluster_size"])
         real = dmg[dmg.event.isin(evs)]
         actual_out = g.premises_out(real.iso_dev.to_numpy())
         auc = roc_auc_score(actual_out, p_out)
@@ -158,20 +184,53 @@ def main():
             actual_damage=int(act_cell.sum()), cell_rank_corr=round(float(rho), 3),
             premise_auc=round(float(auc), 3),
             predicted_customers_out=int((p_out * cust).sum()), actual_customers_out=int(cust[actual_out].sum()),
+            outage_cluster_size=outage["cluster_size"],
             reliability={k: {kk: round(v, 3) if isinstance(v, float) else v for kk, v in r.items()}
                          for k, r in rel.to_dict(orient="index").items()},
         )
         log(name, validation[name])
 
+    # What customers are told: the share of customers in each band who actually lost power in past
+    # storms, pooled over the hold-out tests (each storm predicted by a model that never saw it).
+    band_outcomes = {}
+    for b in risk.BAND_ORDER:
+        rows = [(v["reliability"][b]["customers"], v["reliability"][b]["actual"], k)
+                for k, v in validation.items() if b in v["reliability"]]
+        n = sum(r[0] for r in rows)
+        if n:
+            band_outcomes[b] = dict(raw_share=round(sum(c * a for c, a, _ in rows) / n, 3), customers=int(n),
+                                    storms=[k for c, _, k in rows if c > 0])
+    # A higher band must never read as safer: pool adjacent bands that come out of order
+    # (customer-weighted pool-adjacent-violators), so the shares rise with the band.
+    blocks = [[b] for b in band_outcomes]
+
+    def share(bl):
+        return (sum(band_outcomes[b]["raw_share"] * band_outcomes[b]["customers"] for b in bl)
+                / sum(band_outcomes[b]["customers"] for b in bl))
+
+    i = 0
+    while i < len(blocks) - 1:
+        if share(blocks[i]) > share(blocks[i + 1]):
+            blocks[i:i + 2] = [blocks[i] + blocks[i + 1]]
+            i = max(i - 1, 0)
+        else:
+            i += 1
+    for bl in blocks:
+        for b in bl:
+            band_outcomes[b]["share"] = round(share(bl), 3)
+    log("band outcomes", band_outcomes)
+
     X = risk.design(f, g.cells, hist_rows([]))
     m = fit(np.ones(len(f), bool), X)
     c_wind = wind_calibration(m, X, np.ones(len(f), bool))
     log("wind calibration factor", round(c_wind, 2))
+    outage, _ = outage_step([])
+    log("outage step", {k: v for k, v in outage.items() if k != "placement"})
     rng = dict(gust_max=float(f.gust_max.max()), frz=float(f.frz.max()), snow=float(f.snow.max()),
                rain72=float(f.rain72.max()), tmin=float(f.tmin.min()), tmax=float(f.tmax.max()))
     out = dict(coef=m.coef_.round(5).tolist(), intercept=round(float(m.intercept_), 5),
                features=[k for k, _ in risk.FEATURES], labels=[l for _, l in risk.FEATURES],
-               mixes=mixes, validation=validation, train_range=rng,
+               mixes=mixes, outage=outage, validation=validation, band_outcomes=band_outcomes, train_range=rng,
                trained_on=f"{f.day.min().date()} to {f.day.max().date()}", rows=int(len(f)),
                damage_records=int(f.y.sum()), wind_calibration=round(c_wind, 3), leaf_on_factor=risk.LEAF_ON_FACTOR, excluded_days=[str(d.date()) for d in severe_unlabeled])
     risk.MODEL_PATH.write_text(json.dumps(out, indent=1))

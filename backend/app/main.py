@@ -120,7 +120,9 @@ def customer_view(res: dict, pidx: int, needs: list[str], prefs: dict | None = N
         delay = ("high winds keep bucket trucks grounded above 30 mph" if hazard in ("wind", "tropical", "tornado")
                  else "ice and downed trees make roads slow and work hazardous" if hazard == "ice"
                  else "crews are working through damage in order of customers restored")
-    ctx = dict(scenario_name=sc["name"], band=st["risk"]["band"], p_out=st["risk"]["p_out"],
+    obs = st["risk"]["observed"]
+    ctx = dict(scenario_name=sc["name"], band=st["risk"]["band"],
+               band_lost_share=obs["share"] if obs else None, band_past_storms=obs["storms"] if obs else None,
                confidence=st["confidence"]["level"], factors=factors[:5],
                estimate_label=est["label"] if est else None, cause_plain=cause, fixed_plain=fixed,
                delay_reason=delay, hazard=hazard, declared_needs=needs)
@@ -250,7 +252,9 @@ def mailbox():
 # ------------------------------------------------------------------ shared (any signed-in user)
 @app.get("/api/scenarios")
 def scenarios(user=Depends(current_user)):
-    return dict(active=db.get_setting("active_scenario"), scenarios=catalogue())
+    return dict(active=db.get_setting("active_scenario"), scenarios=catalogue(),
+                band_outcomes={b: dict(share=o["share"], storms=len(o["storms"]))
+                               for b, o in risk.band_outcomes().items()})
 
 
 @app.get("/api/weather")
@@ -562,9 +566,15 @@ def aep_model(user=Depends(require_aep)):
                     "Damage records come from AEP's ARCOS extract; severe-weather days with no records are treated as "
                     "unlabeled because the extract appears to cover selected events only.",
                     "Wind-driven days are scaled by an in-sample calibration factor so real wind events match.",
-                    "Weather is ERA5-based reanalysis on a ~10 km grid; it smooths thunderstorm gusts.",
+                    "Weather is ERA5-based reanalysis on a ~10 km grid; it smooths thunderstorm gusts. Each ~2 km "
+                    "area's temperature is corrected for its elevation (6.5 C per km) when deciding where rain "
+                    "freezes, since ridges ice up while the valley stays above freezing.",
                     "Outages are traced through AEP's premise-to-device topology; damage isolates the nearest "
                     "protective device (lateral fuse, or recloser/breaker on backbone lines).",
+                    "Within an area, damage is placed where real ARCOS damage lands (far less on substation backbone "
+                    "and secondary poles) and arrives in clusters of "
+                    f"{m.get('outage', {}).get('cluster_size', 1.0):.2f} reports per device, fitted so real storms' "
+                    "damage reproduces the customers who lost power.",
                     "Repair hours come from AEP's labor workbook x ILM 4.5; crews of 4; 16-hour shifts; bucket work "
                     "stops at 30 mph gusts and slows from 28 mph.",
                     "Crew defaults (45 local + 45 mutual aid from day 1) reproduce the real Feb 2025 repair times.",

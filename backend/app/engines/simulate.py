@@ -54,6 +54,16 @@ def asset_hours() -> np.ndarray:
 
 
 @lru_cache(maxsize=1)
+def _assets_by_device() -> tuple[np.ndarray, np.ndarray]:
+    """Asset indices sorted by isolating device; assets of device d are order[start[d]:start[d + 1]]."""
+    g = grid()
+    iso = g.assets.iso_dev.to_numpy()
+    order = np.argsort(iso, kind="stable")
+    start = np.searchsorted(iso[order], np.arange(g.n_dev + 1))
+    return order, start
+
+
+@lru_cache(maxsize=1)
 def _facility_cells() -> set:
     """Grid cells containing a hospital (their circuits get restoration priority)."""
     import json
@@ -200,8 +210,10 @@ def run(p: Params) -> dict:
     lam, peak, contrib = risk.expected_damage(hourly)
     mix = _hazard_mix(sc, peak)
     rule_rate, rule_when = _rule_rates(sc, hourly, len(g.assets))
-    dev_rate = risk.device_rates(lam, mix, rule_rate)
-    p_out = risk.premise_outage_prob(dev_rate)
+    dev_storm = risk.device_rates(lam, mix)
+    dev_rule = risk.device_rates(np.zeros_like(lam), mix, rule_rate)  # rule damage is not clustered
+    dev_rate = dev_storm + dev_rule
+    p_out = risk.premise_outage_prob(dev_storm, independent_rate=dev_rule)
 
     # hourly hazard intensity per cell (to time damage within the event)
     inten = hourly.hazard_intensity()[cell_to_point()]  # (cells, hours)
@@ -230,6 +242,9 @@ def run(p: Params) -> dict:
 
     tcode = pd.Categorical(atype_all, categories=risk.ASSET_TYPES).codes
     mix_vec = np.array([mix.get(t, 0) for t in risk.ASSET_TYPES])
+    prop = risk.asset_propensity()
+    kclus = risk.cluster_size()
+    iso_order, iso_start = _assets_by_device()
 
     def sample_damage():
         """Returns (asset idx, damage hour, access flag, special-equipment flag)."""
@@ -244,7 +259,8 @@ def run(p: Params) -> dict:
             acc = (real.access_issue == "Yes").to_numpy()
             spec = real.special_equipment.fillna("").ne("").to_numpy()
             return idx, when, acc, spec
-        n_c = rng.poisson(lam)
+        # damage arrives in clusters on one device (mean kclus reports each), seeded by placement propensity
+        n_c = rng.poisson(lam / kclus)
         picks = []
         for c in np.nonzero(n_c)[0]:
             present = [k for k, t in enumerate(risk.ASSET_TYPES) if (c, t) in g.assets_by_cell_type and mix_vec[k] > 0]
@@ -254,7 +270,14 @@ def run(p: Params) -> dict:
             types = rng.choice(present, size=n_c[c], p=w)
             for k in types:
                 pool = g.assets_by_cell_type[(c, risk.ASSET_TYPES[k])]
-                picks.append(pool[rng.integers(len(pool))])
+                pw = prop[pool]
+                seed = pool[rng.choice(len(pool), p=pw / pw.sum())]
+                picks.append(seed)
+                extra = rng.poisson(kclus - 1)
+                d = iso_all[seed]
+                if extra and d >= 0:
+                    same = iso_order[iso_start[d]:iso_start[d + 1]]
+                    picks.extend(same[rng.integers(len(same), size=extra)])
         idx = np.array(picks, dtype=int)
         when = sample_hours(np.maximum(g.asset_cell[idx], 0)) if len(idx) else np.zeros(0)
         if rule_rate.any():
