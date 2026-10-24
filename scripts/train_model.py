@@ -155,6 +155,7 @@ def main():
         return dict(placement=placement, cluster_size=risk.fit_cluster_size(events, placement)), mx
 
     validation = {}
+    band_rows = []  # per premise in each hold-out: band, storm, circuit, customers, lost power
     for name, (a, b, evs) in HOLDOUTS.items():
         hold = (f.day >= a) & (f.day <= b)
         X = risk.design(f, g.cells, hist_rows(evs))
@@ -175,6 +176,8 @@ def main():
         auc = roc_auc_score(actual_out, p_out)
         cust = g.prem_customers
         bands = [risk.band(p) for p in p_out]
+        band_rows.append(pd.DataFrame(dict(band=bands, storm=name, circuit=g.prem.circuit.to_numpy(), w=cust,
+                                           out=actual_out)))
         rel = (pd.DataFrame(dict(band=bands, p=p_out, out=actual_out, w=cust))
                .groupby("band").apply(lambda d: pd.Series(dict(
                    customers=int(d.w.sum()), predicted=float(np.average(d.p, weights=d.w)),
@@ -190,23 +193,27 @@ def main():
         )
         log(name, validation[name])
 
-    # What customers are told: the share of customers in each band who actually lost power in past
-    # storms, pooled over the hold-out tests (each storm predicted by a model that never saw it).
+    # What customers are told: the share of homes in each band that actually lost power in past storms,
+    # pooled over the hold-out tests (each storm predicted by a model that never saw it).
+    # Outages hit whole circuits at once, so homes are not independent: one circuit going dark would
+    # count as thousands of outcomes (it made Severe read 77% from a single circuit). Each circuit in
+    # each storm is one outcome instead: share = the typical circuit's share of homes that lost power.
+    units = (pd.concat(band_rows).assign(o=lambda d: d.out * d.w)
+             .groupby(["band", "storm", "circuit"]).agg(w=("w", "sum"), o=("o", "sum")).reset_index())
+    units = units[units.w > 0].assign(r=lambda d: d.o / d.w)
     band_outcomes = {}
     for b in risk.BAND_ORDER:
-        rows = [(v["reliability"][b]["customers"], v["reliability"][b]["actual"], k)
-                for k, v in validation.items() if b in v["reliability"]]
-        n = sum(r[0] for r in rows)
-        if n:
-            band_outcomes[b] = dict(raw_share=round(sum(c * a for c, a, _ in rows) / n, 3), customers=int(n),
-                                    storms=[k for c, _, k in rows if c > 0])
+        x = units[units.band == b]
+        if len(x):
+            band_outcomes[b] = dict(raw_share=round(float(x.r.mean()), 3), customers=int(x.w.sum()),
+                                    circuits=len(x), storms=sorted(x.storm.unique().tolist()))
     # A higher band must never read as safer: pool adjacent bands that come out of order
-    # (customer-weighted pool-adjacent-violators), so the shares rise with the band.
+    # (pool-adjacent-violators, one vote per circuit), so the shares rise with the band.
     blocks = [[b] for b in band_outcomes]
 
     def share(bl):
-        return (sum(band_outcomes[b]["raw_share"] * band_outcomes[b]["customers"] for b in bl)
-                / sum(band_outcomes[b]["customers"] for b in bl))
+        return (sum(band_outcomes[b]["raw_share"] * band_outcomes[b]["circuits"] for b in bl)
+                / sum(band_outcomes[b]["circuits"] for b in bl))
 
     i = 0
     while i < len(blocks) - 1:

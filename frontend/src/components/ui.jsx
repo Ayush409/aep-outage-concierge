@@ -29,7 +29,7 @@ export function BandLegend() {
           </span>
         ))}
       </div>
-      <div className="small muted">% = homes in that band that lost power in past storms</div>
+      <div className="small muted">% = typical share of homes in that band that lost power in past storms</div>
     </div>
   );
 }
