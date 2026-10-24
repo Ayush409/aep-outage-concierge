@@ -60,10 +60,11 @@ def design(feats: pd.DataFrame, cells: pd.DataFrame, hist: np.ndarray | None = N
     return X
 
 
-def cell_day_features(daily_points: pd.DataFrame) -> pd.DataFrame:
-    """Expand per-point daily features to per-cell rows."""
+def cell_day_features(hourly) -> pd.DataFrame:
+    """Expand per-point daily features to per-cell rows; freezing rain is elevation-corrected per cell."""
     from .weather import cell_to_point
 
+    daily_points = hourly.daily_features()
     pt = cell_to_point()
     g = grid()
     ncell = len(g.cells)
@@ -73,6 +74,7 @@ def cell_day_features(daily_points: pd.DataFrame) -> pd.DataFrame:
     f = by_point.reindex(idx).reset_index(drop=True)
     f["cellpos"] = np.repeat(np.arange(ncell), len(days))
     f["day"] = np.tile(days, ncell)
+    f["frz"] = hourly.cell_freezing_rain().reshape(-1)
     return f
 
 
@@ -124,7 +126,7 @@ def expected_damage(hourly) -> tuple[np.ndarray, pd.DataFrame, np.ndarray]:
     Returns (lambda per cell, feature frame, contributions per cell [peak day]).
     """
     g = grid()
-    f = cell_day_features(hourly.daily_features())
+    f = cell_day_features(hourly)
     X = design(f, g.cells)
     m = model()
     lam_rows = m.rate(X, exposure(g.cells)[f.cellpos.to_numpy()]) * wind_adjustment(f, m)
@@ -151,24 +153,72 @@ def _asset_index():
     return tcode, cellpos, ok, n_ct
 
 
-def asset_weights(mix: dict) -> np.ndarray:
-    """Share of a cell's expected damage that lands on each asset, given an asset-type mix."""
-    tcode, cellpos, ok, n_ct = _asset_index()
+@lru_cache(maxsize=1)
+def placement_keys() -> np.ndarray:
+    """'asset_type|kind of isolating device' per asset (e.g. 'primary|breaker' = backbone near the substation)."""
+    g = grid()
+    iso = g.assets.iso_dev.to_numpy()
+    kind = np.where(iso >= 0, g.dev.kind.to_numpy()[np.maximum(iso, 0)], "none")
+    return g.assets.asset_type.to_numpy().astype(object) + "|" + kind
+
+
+def fit_placement(damage: pd.DataFrame) -> dict:
+    """Relative damage propensity per placement key vs. its asset type, from real ARCOS records.
+
+    Real damage lands far less on breaker-protected backbone and on secondary-side poles than a uniform
+    pick would put there. Smoothed towards 1.0 (the type average) so sparse keys stay neutral.
+    """
+    g = grid()
+    keys = pd.Series(placement_keys())
+    iso = damage.iso_dev.to_numpy()
+    kind = np.where(iso >= 0, g.dev.kind.to_numpy()[np.maximum(iso, 0)], "none")
+    dkeys = pd.Series(damage.asset_type.to_numpy().astype(object) + "|" + kind)
+    n = keys.value_counts()
+    m = dkeys.value_counts().reindex(n.index).fillna(0)
+    t = n.index.str.split("|").str[0]
+    type_rate = (m.groupby(t).sum() / n.groupby(t).sum()).reindex(t).to_numpy()
+    rel = (m.to_numpy() + 1) / (n.to_numpy() * type_rate + 1)
+    return {k: round(float(v), 4) for k, v in zip(n.index, rel)}
+
+
+@lru_cache(maxsize=4)
+def _propensity_cached(items: tuple) -> np.ndarray:
+    table = dict(items)
+    return np.array([table.get(k, 1.0) for k in placement_keys()])
+
+
+def asset_propensity(table: dict | None = None) -> np.ndarray:
+    """Per-asset placement propensity (1.0 everywhere if the model has no placement table)."""
+    if table is None:
+        table = model().meta.get("outage", {}).get("placement", {})
+    return _propensity_cached(tuple(sorted(table.items())))
+
+
+def asset_weights(mix: dict, placement: dict | None = None) -> np.ndarray:
+    """Share of a cell's expected damage that lands on each asset, given an asset-type mix.
+
+    Within a type, assets are weighted by their placement propensity instead of uniformly.
+    """
+    tcode, cellpos, ok, _ = _asset_index()
+    prop = asset_propensity(placement)
     m = np.array([mix.get(t, 0.0) for t in ASSET_TYPES])
+    n_ct = np.zeros((len(grid().cells), len(ASSET_TYPES)))
+    np.add.at(n_ct, (cellpos[ok], tcode[ok]), prop[ok])
     present = (n_ct > 0) * m  # mix restricted to types present in the cell
     norm = present.sum(axis=1)
     norm[norm == 0] = 1.0
     w = np.zeros(len(tcode))
-    w[ok] = m[tcode[ok]] / np.maximum(n_ct[cellpos[ok], tcode[ok]], 1) / norm[cellpos[ok]]
+    w[ok] = m[tcode[ok]] * prop[ok] / np.maximum(n_ct[cellpos[ok], tcode[ok]], 1e-12) / norm[cellpos[ok]]
     return w
 
 
-def device_rates(lam_cells: np.ndarray, mix: dict, extra_asset_rate: np.ndarray | None = None) -> np.ndarray:
+def device_rates(lam_cells: np.ndarray, mix: dict, extra_asset_rate: np.ndarray | None = None,
+                 placement: dict | None = None) -> np.ndarray:
     """Expected number of damaged assets isolated by each device."""
     g = grid()
     _, cellpos, ok, _ = _asset_index()
     lam_a = np.zeros(len(cellpos))
-    lam_a[ok] = lam_cells[cellpos[ok]] * asset_weights(mix)[ok]
+    lam_a[ok] = lam_cells[cellpos[ok]] * asset_weights(mix, placement)[ok]
     if extra_asset_rate is not None:
         lam_a = lam_a + extra_asset_rate
     iso = g.assets.iso_dev.to_numpy()
@@ -176,11 +226,49 @@ def device_rates(lam_cells: np.ndarray, mix: dict, extra_asset_rate: np.ndarray 
     return np.bincount(iso[good], weights=lam_a[good], minlength=g.n_dev)
 
 
-def premise_outage_prob(dev_rate: np.ndarray) -> np.ndarray:
-    """P(premise loses power) = 1 - exp(-sum of damage rates on its upstream devices)."""
+def upstream_rate(dev_rate: np.ndarray) -> np.ndarray:
+    """Sum of expected damage on the devices feeding each premise."""
     g = grid()
-    s = np.bincount(g.chain_p, weights=dev_rate[g.chain_d], minlength=g.n_prem)
+    return np.bincount(g.chain_p, weights=dev_rate[g.chain_d], minlength=g.n_prem)
+
+
+def cluster_size() -> float:
+    return float(model().meta.get("outage", {}).get("cluster_size", 1.0))
+
+
+def premise_outage_prob(dev_rate: np.ndarray, k: float | None = None,
+                        independent_rate: np.ndarray | None = None) -> np.ndarray:
+    """P(premise loses power) = 1 - exp(-s / k), s = expected storm damage on its upstream devices.
+
+    Real damage clusters: several reports often sit behind one fuse, and only the first one cuts power.
+    Damage arrives as Poisson clusters of mean size k on a device (k = 1 is independent damage); the
+    simulation's Monte Carlo draws clusters the same way, so both agree. k is fitted on replayed
+    storms in scripts/train_model.py. independent_rate (per device) is added unclustered, e.g. the
+    heat/cold transformer rules, which fail units independently.
+    """
+    k = cluster_size() if k is None else k
+    s = upstream_rate(dev_rate) / k
+    if independent_rate is not None:
+        s = s + upstream_rate(independent_rate)
     return 1.0 - np.exp(-s)
+
+
+def fit_cluster_size(events: list[tuple[np.ndarray, np.ndarray, dict]], placement: dict) -> float:
+    """Fit k on real storms: events = [(real damage count per cell, actual premises out, hazard mix)].
+
+    Uses real damage counts as input, so this calibrates only the damage -> outage step (not the
+    damage model): expected customers out should match the customers behind the real damage, in
+    every storm (squared log ratio, larger storms weighted more).
+    """
+    from scipy.optimize import minimize_scalar
+
+    cust = grid().prem_customers
+    data = [(upstream_rate(device_rates(lam, mix, placement=placement)), cust[act].sum()) for lam, act, mix in events]
+
+    def loss(k):
+        return sum(np.log(np.sum(cust * (1 - np.exp(-s / k))) / out) ** 2 * np.log(out) for s, out in data)
+
+    return round(float(minimize_scalar(loss, bounds=(1.0, 10.0), method="bounded").x), 3)
 
 
 def band(p: float) -> str:
@@ -194,3 +282,15 @@ def band(p: float) -> str:
 
 
 BAND_ORDER = ["Low", "Elevated", "High", "Severe"]
+
+
+def band_outcomes() -> dict:
+    """{band: {share, customers, storms}}: share of customers in that band who actually lost power in
+    past storms the model had not seen (scripts/train_model.py). This, not p_out, is what customers see:
+    the bands rank risk, but the raw probability is overconfident."""
+    return model().meta.get("band_outcomes", {})
+
+
+def band_outcome(b: str) -> dict | None:
+    o = band_outcomes().get(b)
+    return dict(share=o["share"], storms=len(o["storms"])) if o else None

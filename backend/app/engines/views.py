@@ -75,6 +75,7 @@ def cells(res: dict) -> list[dict]:
         top = np.argsort(-contrib[i])[:3]
         rows.append(dict(cell=int(c.index[i]), lon=_r(c.lon.iloc[i], 4), lat=_r(c.lat.iloc[i], 4),
                          customers=int(w[i]), p_out=_r(mean_p[i], 3), band=risk.band(mean_p[i]),
+                         observed=risk.band_outcome(risk.band(mean_p[i])),
                          exp_damage=_r(res["lam"][i], 2), gust=_r(peak.gust_max.iloc[i]),
                          ice=_r(peak.frz.iloc[i], 2),
                          factors=[labels[k] for k in top if contrib[i, k] > 0.05]))
@@ -248,7 +249,8 @@ def premise_status(res: dict, pidx: int) -> dict:
     return dict(
         premise=dict(service=pr.service_kind, life_support=bool(pr.life_support), city=pr.city.title(),
                      zip=pr.zip, customers=int(pr.customers)),
-        risk=dict(p_out=_r(p_out, 3), band=risk.band(p_out), simulated_share=_r(mc_out, 2),
+        risk=dict(p_out=_r(p_out, 3), band=risk.band(p_out), observed=risk.band_outcome(risk.band(p_out)),
+                  simulated_share=_r(mc_out, 2),
                   weather=dict(peak_gust=_r(peak.gust_max), ice_in=_r(peak.frz, 2), snow_in=_r(peak.snow, 1),
                                tmin=_r(peak.tmin), tmax=_r(peak.tmax)),
                   factors=factors, exposure=exposure),

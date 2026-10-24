@@ -63,7 +63,7 @@ function Holdout({ name, v }) {
       <b>{name} (never seen in training)</b>
       <table><tbody>
         <tr><td>Damage reports: predicted vs actual</td><td className="num">{fmt.n(v.predicted_damage)} vs {fmt.n(v.actual_damage)}</td></tr>
-        <tr><td>Customers out: predicted vs actual</td><td className="num">{fmt.n(v.predicted_customers_out)} vs {fmt.n(v.actual_customers_out)}</td></tr>
+        <tr><td>Customers out: predicted vs behind real damage</td><td className="num">{fmt.n(v.predicted_customers_out)} vs {fmt.n(v.actual_customers_out)}</td></tr>
         <tr><td>Area ranking correlation</td><td className="num">{v.cell_rank_corr}</td></tr>
         <tr><td>Home-level AUC (0.5 = coin flip)</td><td className="num">{v.premise_auc}</td></tr>
       </tbody></table>

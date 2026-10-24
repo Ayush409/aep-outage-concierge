@@ -36,7 +36,8 @@ for k,r in enumerate(rs,1):
       'substation':r['Substation'],'circuit':r['Circuit'],'asset_type':r['Asset_Type'] or '(blank)','damage':r['Inform_Wor'],
       'access_issue':r['Access_Iss'],'special_equipment':r['Special_Eq'],'photos':int(float(r['Media'] or 0)),
       'latitude':round(float(r['Latitude']),5),'longitude':round(float(r['Longitude']),5)})
-p=sys.argv[2] if len(sys.argv)>2 else ROOT/'data/processed/damage_records.csv'
+p=Path(sys.argv[2]) if len(sys.argv)>2 else ROOT/'data/processed/damage_records.csv'
+p.parent.mkdir(parents=True,exist_ok=True)  # data/processed/ is git-ignored, so absent on a fresh clone
 with open(p,'w',newline='') as f:
     w=csv.DictWriter(f,fieldnames=list(out[0])); w.writeheader(); w.writerows(out)
 print('wrote',len(out))

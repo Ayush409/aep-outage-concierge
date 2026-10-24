@@ -19,6 +19,7 @@ GRID_LON = np.round(np.arange(-80.25, -79.64, 0.1), 2)
 GRID_LAT = np.round(np.arange(37.0, 37.51, 0.1), 2)
 POINTS = np.array([(lon, lat) for lat in GRID_LAT for lon in GRID_LON])
 FREEZE_F = 32.5
+LAPSE_F_PER_M = 0.0117  # standard atmosphere: 6.5 C per km
 
 
 @lru_cache(maxsize=1)
@@ -28,6 +29,32 @@ def cell_to_point() -> np.ndarray:
     tree = cKDTree(POINTS)
     _, k = tree.query(np.column_stack([g.cells.lon, g.cells.lat]))
     return k
+
+
+@lru_cache(maxsize=1)
+def cell_elevation() -> np.ndarray:
+    """Elevation (m) of every grid cell centre; NaN without elevation.json."""
+    path = WEATHER / "elevation.json"
+    g = grid()
+    if not path.exists():
+        return np.full(len(g.cells), np.nan)
+    e = json.loads(path.read_text())["cells"]
+    return np.array([e.get(str(int(c)), np.nan) for c in g.cell_ids], dtype=float)
+
+
+@lru_cache(maxsize=1)
+def cell_elevation_offset() -> np.ndarray:
+    """Metres each grid cell sits above (+) or below (-) its weather point (0 without elevation.json).
+
+    Weather points are ~10 km apart, but Roanoke's ridges sit 300-700 m above the valley floor. Ice
+    storms hinge on a few degrees: the Feb 2025 ice damage per pole was ~20x higher above 600 m.
+    """
+    path = WEATHER / "elevation.json"
+    if not path.exists():
+        return np.zeros(len(grid().cells))
+    pe = np.asarray(json.loads(path.read_text())["points"], dtype=float)
+    dz = cell_elevation() - pe[cell_to_point()]
+    return np.where(np.isfinite(dz), dz, 0.0)
 
 
 class Hourly:
@@ -94,6 +121,23 @@ class Hourly:
         for p in range(npnt):
             rows.append(pd.DataFrame({k: v[p] for k, v in feats.items()}).assign(point=p, day=days))
         return pd.concat(rows, ignore_index=True)
+
+    def cell_freezing_rain(self) -> np.ndarray:
+        """Freezing rain per (cell, day), 3-day sum like daily_features' frz, with each cell's
+        temperature corrected for its elevation above or below its weather point."""
+        t = self.time.dt.floor("D")
+        di = pd.Index(sorted(t.unique())).get_indexer(t)
+        starts = np.r_[0, np.nonzero(np.diff(di))[0] + 1]
+        pt, dz = cell_to_point(), cell_elevation_offset()
+        temp, rain = self.f["temperature_2m"], self.f["rain"]
+        daily = np.zeros((len(pt), len(starts)))
+        for lo in range(0, len(pt), 64):  # chunks keep the (cells, hours) arrays small
+            sl = slice(lo, lo + 64)
+            tc = temp[pt[sl]] - LAPSE_F_PER_M * dz[sl, None]
+            daily[sl] = np.add.reduceat(np.where(tc <= FREEZE_F, rain[pt[sl]], 0.0), starts, axis=1)
+        cs = np.concatenate([np.zeros((len(pt), 1)), np.cumsum(daily, axis=1)], axis=1)
+        lag = np.maximum(np.arange(daily.shape[1]) - 2, 0)
+        return cs[:, 1:] - cs[:, lag]
 
     def hazard_intensity(self) -> np.ndarray:
         """Hourly damage-driving intensity per point, used to time damage within an event."""
