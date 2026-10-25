@@ -39,7 +39,7 @@ def _startup():
 
 
 # ------------------------------------------------------------------ helpers
-def params(scenario: str | None = None, crews: int = 20, mutual_aid_crews: int = 20, mutual_aid_day: float = 1.0,
+def params(scenario: str | None = None, crews: int = 20, mutual_aid_crews: int = 40, mutual_aid_day: float = 1.0,
            gust_mult: float = 1.0, access_mult: float = 1.0) -> simulate.Params:
     sid = scenario or db.get_setting("active_scenario")
     if sid not in SCENARIOS:
@@ -788,7 +788,8 @@ def aep_model(user=Depends(require_aep)):
                     "damage reproduces the customers who lost power.",
                     "Repair hours come from AEP's labor workbook x ILM 4.5; crews of 4; 16-hour shifts; bucket work "
                     "stops at 30 mph gusts and slows from 28 mph.",
-                    "Crew defaults (45 local + 45 mutual aid from day 1) reproduce the real Feb 2025 repair times.",
+                    "Crew defaults (20 local + 40 mutual aid from day 1) best match the real Feb 2025 repair dates "
+                    "(the only storm with usable repair dates).",
                 ])
 
 
