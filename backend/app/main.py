@@ -40,10 +40,13 @@ def _startup():
 
 # ------------------------------------------------------------------ helpers
 def params(scenario: str | None = None, crews: int | None = None, mutual_aid_crews: int | None = None,
-           mutual_aid_day: float = 1.0, gust_mult: float = 1.0, access_mult: float = 1.0) -> simulate.Params:
+           mutual_aid_day: float = 1.0, gust_mult: float = 1.0, access_mult: float = 1.0,
+           snow_mult: float = 1.0) -> simulate.Params:
     sid = scenario or db.get_setting("active_scenario")
     if sid not in SCENARIOS:
         raise HTTPException(404, "Unknown scenario")
+    inputs = SCENARIOS[sid].get("weather_inputs", [])  # snowfall only where the storm offers it
+    snow_mult = round(float(np.clip(snow_mult, 0.5, 2.0)), 2) if "snow" in inputs else 1.0
     d = default_crews(sid)
     crews = d["crews"] if crews is None else crews
     mutual_aid_crews = d["mutual_aid_crews"] if mutual_aid_crews is None else mutual_aid_crews
@@ -51,7 +54,8 @@ def params(scenario: str | None = None, crews: int | None = None, mutual_aid_cre
                            mutual_aid_crews=int(np.clip(mutual_aid_crews, 0, 400)),
                            mutual_aid_day=float(np.clip(mutual_aid_day, 0, 10)),
                            gust_mult=round(float(np.clip(gust_mult, 0.5, 1.6)), 2),
-                           access_mult=round(float(np.clip(access_mult, 0, 3)), 2))
+                           access_mult=round(float(np.clip(access_mult, 0, 3)), 2),
+                           snow_mult=snow_mult)
 
 
 def sim(p: simulate.Params) -> dict:
@@ -575,7 +579,8 @@ def aep_chat(body: ChatBody, user=Depends(require_aep)):
     for f in (0.5, 1, 2):  # quick 12-run crew what-ifs (same storm)
         lc, ma = max(1, round(p.crews * f)), round(p.mutual_aid_crews * f)
         s_ = sim(simulate.Params(scenario=p.scenario, crews=lc, mutual_aid_crews=ma,
-                                 mutual_aid_day=p.mutual_aid_day, runs=12))["summary"]
+                                 mutual_aid_day=p.mutual_aid_day, gust_mult=p.gust_mult, access_mult=p.access_mult,
+                                 snow_mult=p.snow_mult, runs=12))["summary"]
         what_if.append(dict(local_crews=lc, mutual_aid_crews=ma, hours_to_90pct=s_["hours_to_90pct"],
                             hours_to_all=s_["hours_to_all"], crew_wait_hours=s_["crew_wait_hours"]))
     with db.tx() as con:

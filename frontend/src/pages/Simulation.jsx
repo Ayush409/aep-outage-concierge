@@ -7,7 +7,7 @@ import { BOUNDS, sample } from "../components/weather.js";
 import { ErrorBox, Loading, Stat, useFetch } from "../components/ui.jsx";
 import { CostBars, OutageCurve } from "../components/charts.jsx";
 
-const DEFAULTS = { crews: 20, mutual_aid_crews: 40, mutual_aid_day: 1, gust_mult: 1, access_mult: 1 };
+const DEFAULTS = { crews: 20, mutual_aid_crews: 40, mutual_aid_day: 1, gust_mult: 1, access_mult: 1, snow_mult: 1 };
 const PLAY_MS = 8000;
 const N_PARTICLES = 1400;
 
@@ -124,6 +124,13 @@ export default function Simulation() {
         <Slider label="Wind strength" v={draft.gust_mult} min={0.6} max={1.5} step={0.05} fmtv={(v) => `${Math.round(v * 100)}%`}
           on={(v) => setDraft({ ...draft, gust_mult: v })} />
         <div className="small muted">Changes how much breaks and how many customers lose power.</div>
+        {sc?.weather_inputs?.includes("snow") && (
+          <>
+            <Slider label="Snowfall" v={draft.snow_mult} min={0.5} max={2} step={0.1} fmtv={(v) => `${Math.round(v * 100)}%`}
+              on={(v) => setDraft({ ...draft, snow_mult: v })} />
+            <div className="small muted">More snow means more weight on lines and limbs.</div>
+          </>
+        )}
         <div className="small" style={{ fontWeight: 600 }}>The response</div>
         <Slider label="Local crews" v={draft.crews} min={5} max={200} step={5} on={(v) => setDraft({ ...draft, crews: v })} />
         <Slider label="Mutual-aid crews" v={draft.mutual_aid_crews} min={0} max={200} step={5}
@@ -174,6 +181,7 @@ export default function Simulation() {
           <>
             <div className="small secondary" role="status">
               {ov.loading ? "Running the simulation with your new inputs..." : <>Results for: <b>wind {Math.round(params.gust_mult * 100)}%</b>
+                {sc?.weather_inputs?.includes("snow") && <>{" · "}<b>snowfall {Math.round(params.snow_mult * 100)}%</b></>}
                 {" · "}<b>{params.crews} local crews</b>{" · "}<b>{params.mutual_aid_crews} mutual-aid crews</b>
                 {" (arriving day "}{params.mutual_aid_day}{") · access problems "}{params.access_mult}x</>}
             </div>
