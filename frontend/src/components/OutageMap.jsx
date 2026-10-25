@@ -29,13 +29,13 @@ export default function OutageMap({ aep = false }) {
   const [hour, setHour] = useState(0); // hours since the start of the window (= outage frame index)
   const [show, setShow] = useState({ risk: true, out: true, pins: true, fac: true });
 
-  // Scenarios follow restoration frames; live mode retains the forecast window.
+  // The slider covers the weather window (outages after the weather data ends are not shown on the slider).
   const wxStep = weather && weather.time.length > 1 ? (new Date(weather.time[1]) - new Date(weather.time[0])) / 3.6e6 : 1;
   const nWx = weather?.time.length || 0;
   const times = useMemo(() => {
     if (!weather) return null;
-    return mapTimes(weather.time, frames, scenario === "live");
-  }, [weather, frames, scenario]);
+    return mapTimes(weather.time, frames, true).slice(0, Math.round((nWx - 1) * wxStep) + 1);
+  }, [weather, frames, nWx, wxStep]);
   const evHour = Math.min(hour, Math.max((frames?.hours?.length || 1) - 1, 0));
   const wxIdx = Math.min(Math.floor(hour / wxStep), Math.max(nWx - 1, 0));
   const weatherAvailable = hour <= Math.round((nWx - 1) * wxStep);
@@ -46,14 +46,14 @@ export default function OutageMap({ aep = false }) {
   const peak = useMemo(() => {
     if (!frames?.cells?.length) return null;
     let best = { h: 0, total: 0 };
-    const end = frames.hours.length;
+    const end = Math.min(frames.hours.length, times?.length || 0); // peak within the slider
     for (let h = 0; h < end; h++) {
       const total = frameTotal(h);
       if (total > best.total) best = { h, total };
     }
     return best.total ? best : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frames, nWx, wxStep]);
+  }, [frames, times]);
 
   // live forecast opens at "now"; a storm simulation opens at its peak outage hour
   useEffect(() => {
@@ -165,7 +165,7 @@ export default function OutageMap({ aep = false }) {
           {times?.length > 0 && <TimeSlider times={times} hour={Math.min(hour, times.length - 1)} setHour={setHour} />}
           {peak && <button className="chip" onClick={() => setHour(peak.h)}>Jump to peak outage
             ({fmt.n(peak.total)} customers)</button>}
-          {restoredHour !== null && <button className="chip" onClick={() => setHour(restoredHour)}>
+          {restoredHour !== null && restoredHour < (times?.length || 0) && <button className="chip" onClick={() => setHour(restoredHour)}>
             Jump to all customers restored</button>}
           {!aep && status && <RestorationSummary status={status} compact />}
           {aep && frames?.all_restored_hour != null && <div className="small">
