@@ -10,6 +10,7 @@ from functools import lru_cache
 
 import numpy as np
 import pandas as pd
+from scipy.stats import poisson
 
 from . import costs, risk
 from .data import PROCESSED, grid
@@ -37,6 +38,7 @@ class Params:
     mutual_aid_day: float = 1.0
     gust_mult: float = 1.0
     access_mult: float = 1.0
+    snow_mult: float = 1.0  # snowfall amount (scenarios that list "snow" in weather_inputs)
     runs: int = 40
     seed: int = 7
 
@@ -232,7 +234,7 @@ def run(p: Params) -> dict:
     g = grid()
     sc = SCENARIOS[p.scenario]
     rng = np.random.default_rng(p.seed)
-    hourly = weather_for(p.scenario, p.gust_mult)
+    hourly = weather_for(p.scenario, p.gust_mult, p.snow_mult)
     T = hourly.hours
     H = T + 24 * HORIZON_DAYS
     lam, peak, contrib = risk.expected_damage(hourly, snow_ice_equiv=sc.get("snow_ice_equiv", 0.0))
@@ -248,10 +250,6 @@ def run(p: Params) -> dict:
     inten = hourly.hazard_intensity()[cell_to_point()]  # (cells, hours)
     inten_cdf = np.cumsum(inten, axis=1)
     inten_cdf /= inten_cdf[:, -1:]
-
-    def sample_hours(cells):
-        u = rng.random(len(cells))
-        return np.array([np.searchsorted(inten_cdf[c], uu) for c, uu in zip(cells, u)], float) + rng.random(len(cells))
 
     hours_a = asset_hours()
     iso_all = g.assets.iso_dev.to_numpy()
@@ -277,7 +275,7 @@ def run(p: Params) -> dict:
     kclus = risk.cluster_size()
     iso_order, iso_start = _assets_by_device()
 
-    def sample_damage():
+    def sample_damage(run_i: int):
         """Returns (asset idx, damage hour, access flag, special-equipment flag)."""
         if real is not None:
             idx = real.asset.to_numpy()
@@ -290,40 +288,49 @@ def run(p: Params) -> dict:
             acc = (real.access_issue == "Yes").to_numpy()
             spec = real.special_equipment.fillna("").ne("").to_numpy()
             return idx, when, acc, spec
-        # damage arrives in clusters on one device (mean kclus reports each), seeded by placement propensity
-        n_c = rng.poisson(lam / kclus)
-        picks = []
-        for c in np.nonzero(n_c)[0]:
+        # Damage arrives in clusters on one device (mean kclus reports each), seeded by placement propensity.
+        # Each cell draws from its own random stream per run, and the cluster count comes from one fixed uniform
+        # (Poisson quantile). A stronger storm (wind, snowfall slider) then only adds damage on top of the same
+        # draws instead of reshuffling them, so results move steadily with the sliders.
+        acc_rate = min(behave["access_rate"] * p.access_mult, 1.0)
+        picks, when, acc, spec = [], [], [], []
+        for c in np.nonzero(lam > 0)[0]:
+            r = np.random.default_rng([p.seed, run_i, int(c)])
+            n = int(poisson.ppf(r.random(), lam[c] / kclus))
             present = [k for k, t in enumerate(risk.ASSET_TYPES) if (c, t) in g.assets_by_cell_type and mix_vec[k] > 0]
-            if not present:
+            if not n or not present:
                 continue
             w = mix_vec[present] / mix_vec[present].sum()
-            types = rng.choice(present, size=n_c[c], p=w)
-            for k in types:
+            for _ in range(n):
+                k = present[r.choice(len(present), p=w)]
                 pool = g.assets_by_cell_type[(c, risk.ASSET_TYPES[k])]
                 pw = prop[pool]
-                seed = pool[rng.choice(len(pool), p=pw / pw.sum())]
-                picks.append(seed)
-                extra = rng.poisson(kclus - 1)
-                d = iso_all[seed]
+                cluster = [pool[r.choice(len(pool), p=pw / pw.sum())]]
+                extra = r.poisson(kclus - 1)
+                d = iso_all[cluster[0]]
                 if extra and d >= 0:
                     same = iso_order[iso_start[d]:iso_start[d + 1]]
-                    picks.extend(same[rng.integers(len(same), size=extra)])
-        idx = np.array(picks, dtype=int)
-        when = sample_hours(np.maximum(g.asset_cell[idx], 0)) if len(idx) else np.zeros(0)
+                    cluster.extend(same[r.integers(len(same), size=extra)])
+                hour = np.searchsorted(inten_cdf[c], r.random()) + r.random()  # same hour for the whole cluster
+                for a_ in cluster:
+                    picks.append(a_)
+                    when.append(hour)
+                    acc.append(r.random() < acc_rate)
+                    spec.append(r.random() < behave["special_equipment_rate"])
+        idx, when = np.array(picks, dtype=int), np.array(when, float)
+        acc, spec = np.array(acc, bool), np.array(spec, bool)
         if rule_rate.any():
             hit = np.nonzero(rng.random(len(rule_rate)) < 1 - np.exp(-rule_rate))[0]
             idx = np.concatenate([idx, hit])
             when = np.concatenate([when, np.maximum(rule_when[hit], 0) + rng.random(len(hit)) * 2])
+            acc = np.concatenate([acc, rng.random(len(hit)) < acc_rate])
+            spec = np.concatenate([spec, rng.random(len(hit)) < behave["special_equipment_rate"]])
         idx, first = np.unique(idx, return_index=True)
-        when = when[first]
-        acc = rng.random(len(idx)) < min(behave["access_rate"] * p.access_mult, 1.0)
-        spec = rng.random(len(idx)) < behave["special_equipment_rate"]
-        return idx, when, acc, spec
+        return idx, when[first], acc[first], spec[first]
 
     runs = []
-    for _ in range(p.runs):
-        idx, when, acc, spec = sample_damage()
+    for run_i in range(p.runs):
+        idx, when, acc, spec = sample_damage(run_i)
         if len(idx) == 0:
             runs.append(None)
             continue

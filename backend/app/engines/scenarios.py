@@ -31,7 +31,9 @@ SCENARIOS = {
         summary="About a foot of heavy, wet snow near freezing - limbs and lines come down under the weight.",
         learned_from="Loading damage learned from the Feb 2025 ice storm, applied to wet snow (assumption).",
         notes=["No local snow-damage records exist. Wet snow is treated as 0.08 in of ice per inch of snow "
-               "(assumption), using what the model learned from the Feb 2025 ice storm."],
+               "(assumption), using what the model learned from the Feb 2025 ice storm.",
+               "Snow counts fully at 30-35 F and less as it gets colder and drier, down to nothing at 20 F."],
+        weather_inputs=["snow"],  # extra simulation slider: snowfall amount
     ),
     "arctic_cold": dict(
         name="Arctic cold event", kind="scenario", hazard="wind", weather="arctic_2022_12", rules=["cold"],
@@ -42,13 +44,20 @@ SCENARIOS = {
 }
 
 
-def weather_for(sid: str, gust_mult: float = 1.0) -> Hourly:
+def weather_for(sid: str, gust_mult: float = 1.0, snow_mult: float = 1.0) -> Hourly:
+    """Scenario weather with the simulation's what-if adjustments: wind strength and snowfall amount (snowfall only
+    where a scenario lists it). Temperatures are always the recorded ones."""
     sc = SCENARIOS[sid]
     h = live() if sc["weather"] == "live" else event(sc["weather"])
     if sc.get("gust_peak_obs"):
         h = _scale_convective(h, sc["gust_peak_obs"])
     h = _consistent_speed(h)
-    return h.scaled(gust_mult) if gust_mult != 1.0 else h
+    h = h.scaled(gust_mult) if gust_mult != 1.0 else h
+    inputs = sc.get("weather_inputs", [])
+    if snow_mult != 1.0 and "snow" in inputs:
+        h = h.scaled(1.0)  # copy before editing
+        h.f["snowfall"] *= snow_mult
+    return h
 
 
 GUST_FACTOR = 1.6  # typical gust / sustained-wind ratio for strong synoptic winds

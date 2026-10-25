@@ -131,10 +131,12 @@ def expected_damage(hourly, snow_ice_equiv: float = 0.0) -> tuple[np.ndarray, pd
     g = grid()
     f = cell_day_features(hourly)
     if snow_ice_equiv:
-        # Only snow that falls at 30-35 F is wet enough to stick to lines and limbs; colder, dry snow does not
-        # accrete (it still counts through the ordinary snow-load term). Judged hour by hour, not by the day's range.
+        # Snow loads lines and limbs by weight. Wet snow at 30-35 F sticks fully; below 30 F it gets drier and sticks
+        # less, fading linearly to nothing at 20 F (dry powder). Above 35 F it falls as slush/rain. Judged hour by
+        # hour. The Dec 2009 storm (~18 in in Roanoke, mostly 24-32 F) was a heavy-snow, whole-tree event (VA SCC).
         hf = hourly.f
-        wet_snow = np.where((hf["temperature_2m"] >= 30) & (hf["temperature_2m"] <= 35), hf["snowfall"], 0.0)
+        t = hf["temperature_2m"]
+        wet_snow = hf["snowfall"] * np.where(t > 35, 0.0, np.clip((t - 20) / 10, 0.0, 1.0))
         from .weather import Hourly
         wet = cell_day_features(Hourly(hourly.time, {**hf, "snowfall": wet_snow})).snow.to_numpy()
         f["frz"] = f.frz.to_numpy() + snow_ice_equiv * wet
