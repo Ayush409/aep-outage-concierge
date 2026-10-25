@@ -30,12 +30,12 @@ DEMO_PASSWORD = "StormReady!2026"
 
 def pick_premises():
     g = grid()
-    res = simulate.run(simulate.Params(scenario="feb_2025"))
+    res = simulate.run(simulate.Params(scenario="snow_storm"))
     p_out = res["p_out"]
     prem = g.prem.assign(p_out=p_out, out=res["median"]["out"])
-    rural = prem[prem.overhead & prem.out & prem.city.isin(["BENT MOUNTAIN", "COPPER HILL", "ELLISTON", "BOONES MILL"])]
+    rural = prem[prem.overhead & prem.city.isin(["BENT MOUNTAIN", "COPPER HILL", "ELLISTON", "BOONES MILL"])]
     suburban = prem[(prem.service_kind == "Underground") & (prem.city == "ROANOKE")]
-    medical = prem[prem.life_support & prem.out]
+    medical = prem[prem.life_support]
     if medical.empty:
         medical = prem[prem.life_support]
     return (rural.sort_values("p_out").iloc[-1], suburban.sort_values("p_out").iloc[len(suburban) // 2],
@@ -61,9 +61,9 @@ def main():
             if role == "customer":
                 address = f"{100 + int(pr.premise[-3:]) % 800} {pr.road.title()} Rd (demo), {pr.city.title()}, VA"
                 con.execute("INSERT INTO customer_profiles(user_id, premise, address_enc, zip_enc, phone_enc, "
-                            "needs_enc, alerts_sms, alerts_inapp) VALUES (?,?,?,?,?,?,1,1)",
+                            "needs_enc, alerts_sms, alerts_inapp, phone_verified) VALUES (?,?,?,?,?,?,1,1,?)",
                             (cur.lastrowid, pr.premise, encrypt(address), encrypt(pr.zip), encrypt(phone),
-                             encrypt(json.dumps(needs))))
+                             encrypt(json.dumps(needs)), int(phone is not None)))  # demo 555 numbers count as verified
             print(f"  {role:8} {email}")
     print("seeded; password is in scripts/seed_accounts.py")
 

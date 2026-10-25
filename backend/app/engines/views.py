@@ -31,7 +31,7 @@ def hours_label(h: float) -> str:
 
 # ------------------------------------------------------------------ overview + cells
 def overview(res: dict, aep: bool) -> dict:
-    out = dict(scenario=res["scenario"], params=res["params"], summary=res["summary"],
+    out = dict(scenario=res["scenario"], params=res["params"], summary=res["summary"], operations=res.get("operations"),
                confidence=res["confidence"], weather_hours=res["weather_hours"],
                start=res["time"][0], horizon_hours=len(res["time"]))
     out["curve"] = _curve(res)
@@ -218,6 +218,26 @@ def premise_status(res: dict, pidx: int) -> dict:
                          f"could be up to {hours_label(np.percentile(dur, 90))}",
                    outage_start=_r(np.median(starts)), restored=_r(np.median(ends)))
 
+    # what this event does: share of homes in the customer's ZIP that lose power (averaged over runs), and a
+    # representative run for this home (median outage length among runs where it lost power)
+    cust = g.prem_customers
+    in_zip = (g.prem.zip == pr.zip).to_numpy()
+    zip_total = max(float(cust[in_zip].sum()), 1.0)
+    area_share = float(np.mean([cust[r["out"] & in_zip].sum() / zip_total for r in runs])) if runs else 0.0
+    timeline = None
+    if starts:
+        out_runs = [r for r, o in zip(runs, outs) if o]
+        dur = np.array(ends) - np.array(starts)
+        k = int(np.argsort(dur)[len(dur) // 2])
+        lost, back = starts[k], ends[k]
+        assess = (res.get("operations") or {}).get("assess_hours", 2.0)
+        hits = float(np.min(out_runs[k]["when"]))
+        timeline = dict(storm_hits=_r(min(hits, lost)), power_lost=_r(lost), confirmed=_r(min(lost + assess, back)),
+                        estimate_updated=_r(lost + 0.4 * (back - lost)) if back - lost > 4 else None,
+                        restored=_r(back), hours_out=_r(back - lost))
+    event = dict(area=f"ZIP {pr.zip}", area_share=_r(area_share, 3), home_share=_r(mc_out, 3), runs=len(runs),
+                 timeline=timeline)
+
     # contributing factors (cell weather terms + topology exposure)
     m = risk.model()
     cpos = int(g.prem_cell[pidx])
@@ -254,6 +274,6 @@ def premise_status(res: dict, pidx: int) -> dict:
                   weather=dict(peak_gust=_r(peak.gust_max), ice_in=_r(peak.frz, 2), snow_in=_r(peak.snow, 1),
                                tmin=_r(peak.tmin), tmax=_r(peak.tmax)),
                   factors=factors, exposure=exposure),
-        restoration=est, likely_cause=likely_cause,
+        restoration=est, likely_cause=likely_cause, event=event,
         confidence=res["confidence"], scenario=res["scenario"], start=res["time"][0],
     )

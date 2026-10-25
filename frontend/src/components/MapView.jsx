@@ -17,7 +17,7 @@ export const MAX_BOUNDS = [[-80.65, 36.75], [-79.25, 37.75]];
 
 /** MapLibre basemap + deck.gl overlay. Layers update without recreating the map. */
 export default function MapView({ layers, getTooltip, terrain = false, pitch = 0, bearing = 0, zoom = 10.2,
-  center = CENTER, focus = null, onMap, children }) {
+  center = CENTER, focus = null, focusZoom = 12, onMap, children }) {
   const el = useRef(null);
   const map = useRef(null);
   const overlay = useRef(null);
@@ -52,7 +52,7 @@ export default function MapView({ layers, getTooltip, terrain = false, pitch = 0
   const fx = focus?.[0];
   const fy = focus?.[1];
   useEffect(() => {
-    if (fx != null) map.current?.flyTo({ center: [fx, fy], zoom: 12, duration: 1200 });
+    if (fx != null) map.current?.flyTo({ center: [fx, fy], zoom: focusZoom, duration: 1200 });
   }, [fx, fy]);
 
   return (

@@ -3,19 +3,24 @@ import { ColumnLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { fmt, hourLabel, qs } from "../api.js";
 import { useApp } from "../App.jsx";
 import MapView from "../components/MapView.jsx";
-import { BOUNDS, sample, weatherLayer } from "../components/weather.js";
-import { Confidence, ErrorBox, Loading, Stat, useFetch } from "../components/ui.jsx";
+import { BOUNDS, sample } from "../components/weather.js";
+import { ErrorBox, Loading, Stat, useFetch } from "../components/ui.jsx";
 import { CostBars, OutageCurve } from "../components/charts.jsx";
 
-const DEFAULTS = { crews: 45, mutual_aid_crews: 45, mutual_aid_day: 1, gust_mult: 1, access_mult: 1 };
+const DEFAULTS = { crews: 20, mutual_aid_crews: 20, mutual_aid_day: 1, gust_mult: 1, access_mult: 1 };
 const PLAY_MS = 8000;
 const N_PARTICLES = 1400;
 
 export default function Simulation() {
-  const { scenario, scenarios, setScenario, user } = useApp();
+  const { scenarios, scenario, setScenario, user } = useApp();  // selection comes from the top-right toggle
   const aep = user.role === "aep";
   const [draft, setDraft] = useState(DEFAULTS);
   const [params, setParams] = useState(DEFAULTS);
+  // re-run automatically shortly after a slider stops moving
+  useEffect(() => {
+    const t = setTimeout(() => setParams(draft), 600);
+    return () => clearTimeout(t);
+  }, [draft]);
   const q = scenario ? qs({ scenario, ...params }) : null;
   const ov = useFetch(q && `/api/sim/overview${q}`, [q]);
   const frames = useFetch(q && `/api/sim/frames${q}`, [q]).data;
@@ -76,7 +81,7 @@ export default function Simulation() {
   const outNow = columns.reduce((a, c) => a + c.out, 0);
 
   const layers = [
-    weatherLayer(weather, "wind_gusts_10m", wxIdx, true),
+    // wind shown as moving streaks below (static arrows are on the 2D maps)
     new LineLayer({
       id: "wind", data: trails, getSourcePosition: (d) => d.from, getTargetPosition: (d) => d.to,
       getColor: (d) => (d.gust >= 30 ? [11, 61, 145, 230] : [11, 61, 145, 120]), getWidth: (d) => (d.gust >= 45 ? 2.5 : 1.5),
@@ -101,14 +106,12 @@ export default function Simulation() {
   return (
     <div className="page sidebar-layout">
       <aside className="card stack" style={{ alignSelf: "start" }}>
-        <h2>Storm simulation</h2>
-        <label className="field"><span>Event</span>
-          <select value={scenario || ""} onChange={(e) => setScenario(e.target.value)}>
-            {scenarios.filter((x) => x.id !== "live").map((x) => (
-              <option key={x.id} value={x.id}>{x.kind === "replay" ? "Replay: " : "What if: "}{x.name}</option>))}
-          </select>
-        </label>
+        <h2>{scenario === "live" ? "Live forecast - next 7 days" : sc?.name || "Storm simulation"}</h2>
         {sc && <div className="small secondary">{sc.summary}</div>}
+        {scenario === "live" && (
+          <div className="small">Plays out what the coming week's forecast could do. Pick a storm in the top-right menu
+            (or <button className="chip" onClick={() => setScenario("derecho")}>try a derecho</button>) to simulate it.</div>
+        )}
         <hr />
         <div className="small" style={{ fontWeight: 600 }}>Change the inputs</div>
         <Slider label="Local crews" v={draft.crews} min={5} max={200} step={5} on={(v) => setDraft({ ...draft, crews: v })} />
@@ -121,12 +124,11 @@ export default function Simulation() {
         <Slider label="Access problems" v={draft.access_mult} min={0} max={3} step={0.25} fmtv={(v) => `${v}x`}
           on={(v) => setDraft({ ...draft, access_mult: v })} />
         <div className="row">
-          <button className="primary" onClick={() => setParams(draft)} disabled={ov.loading}>
-            {ov.loading ? "Simulating..." : "Run simulation"}</button>
-          <button onClick={() => { setDraft(DEFAULTS); setParams(DEFAULTS); }}>Reset</button>
+          <button onClick={() => setDraft(DEFAULTS)}>Reset</button>
+          <span className="small muted" role="status">{ov.loading ? "Re-running..." : "Results update as you move a slider"}</span>
         </div>
         <div className="small muted">Bucket trucks stop at 30 mph gusts. Each run repeats 40 times with random job times
-          to give ranges.</div>
+          to give ranges. More crews only help while jobs are waiting for a crew - watch "Waiting for a crew".</div>
       </aside>
 
       <div className="stack" style={{ minWidth: 0 }}>
@@ -156,25 +158,30 @@ export default function Simulation() {
               <Stat label="Customers who lose power" value={fmt.n(s.customers_out.p50)}
                 sub={`range ${fmt.n(s.customers_out.p10)}-${fmt.n(s.customers_out.p90)} of ${fmt.n(s.total_customers)}`} />
               <Stat label="Most out at once" value={fmt.n(s.peak_out.p50)} />
-              <Stat label="90% restored by" value={frames ? hourLabel(frames.start, s.hours_to_90pct.p50) : "-"}
-                sub={`could be ${frames ? hourLabel(frames.start, s.hours_to_90pct.p90) : "-"}`} />
-              <Stat label="Repair jobs" value={fmt.n(s.jobs.p50)} sub={`${fmt.n(s.person_hours.p50)} person-hours`} />
+              <Stat label="Typical outage length" value={fmt.hours(s.typical_outage_hours.p50)}
+                sub={`median customer; 90% restored within ${fmt.hours(s.hours_onset_to_90pct.p50)} of the first outage`} />
+              <Stat label="Waiting for a crew" value={fmt.hours(s.crew_wait_hours.p50)}
+                sub={`median per job - ${fmt.n(s.jobs.p50)} jobs, ${fmt.n(s.person_hours.p50)} person-hours`} />
             </div>
-            <div className="grid cols-2">
+            <details className="small confidence-line">
+              <summary>Confidence: <b>{ov.data.confidence.level}</b>
+                {ov.data.operations && <span className="muted"> - {ov.data.operations.label}</span>}
+                {ov.data.confidence.notes.length > 0 && <span className="muted"> (why?)</span>}</summary>
+              <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                {ov.data.confidence.notes.map((n) => <li key={n} className="secondary">{n}</li>)}</ul>
+            </details>
+            <div className={aep && ov.data.cost ? "grid cols-2" : "grid"}>
               <section className="card">
                 <h3>Customers without power over time</h3>
                 <OutageCurve curve={ov.data.curve} start={ov.data.start} />
               </section>
-              <section className="card stack">
-                <h3>How sure are we?</h3>
-                <Confidence c={ov.data.confidence} />
-                {aep && ov.data.cost && <>
-                  <hr />
+              {aep && ov.data.cost && (
+                <section className="card stack">
                   <h3>Who pays</h3>
                   <CostBars height={150} rows={[{ name: sc?.name?.slice(0, 26) || "", lost_revenue: ov.data.cost.lost_revenue,
                     repair: ov.data.cost.repair.total_mid, customer_cost: ov.data.cost.customer_cost }]} />
-                </>}
-              </section>
+                </section>
+              )}
             </div>
           </>
         )}

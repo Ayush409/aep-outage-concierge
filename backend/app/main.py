@@ -3,6 +3,7 @@
 Run (from repo root):  .venv/Scripts/python -m uvicorn app.main:app --app-dir backend --port 8000
 """
 import json
+import secrets
 import time
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from . import ai, db, geocode, guidance
 from .config import DEV_MODE, SESSION_HOURS, TWILIO_FROM, TWILIO_SID, TWILIO_TOKEN
 from .engines import risk, simulate, views
 from .engines.data import PROCESSED, grid
-from .engines.scenarios import SCENARIOS, catalogue, weather_for
+from .engines.scenarios import SCENARIOS, catalogue, display_weather
 from .security import (COOKIE, check_password, current_user, decrypt, encrypt, hash_password, hash_token,
                        make_session, new_reset_token, require_aep, require_customer)
 
@@ -30,12 +31,14 @@ DRAWINGS = PROCESSED / "drawings"
 @app.on_event("startup")
 def _startup():
     db.init()
+    # customers always see the live forecast; storm scenarios are only picked in the Simulation tab
+    db.set_setting("active_scenario", "live")
     grid()
     simulate.asset_hours()
 
 
 # ------------------------------------------------------------------ helpers
-def params(scenario: str | None = None, crews: int = 45, mutual_aid_crews: int = 45, mutual_aid_day: float = 1.0,
+def params(scenario: str | None = None, crews: int = 20, mutual_aid_crews: int = 20, mutual_aid_day: float = 1.0,
            gust_mult: float = 1.0, access_mult: float = 1.0) -> simulate.Params:
     sid = scenario or db.get_setting("active_scenario")
     if sid not in SCENARIOS:
@@ -120,10 +123,12 @@ def customer_view(res: dict, pidx: int, needs: list[str], prefs: dict | None = N
         delay = ("high winds keep bucket trucks grounded above 30 mph" if hazard in ("wind", "tropical", "tornado")
                  else "ice and downed trees make roads slow and work hazardous" if hazard == "ice"
                  else "crews are working through damage in order of customers restored")
-    obs = st["risk"]["observed"]
-    ctx = dict(scenario_name=sc["name"], band=st["risk"]["band"],
-               band_lost_share=obs["share"] if obs else None, band_past_storms=obs["storms"] if obs else None,
-               confidence=st["confidence"]["level"], factors=factors[:5],
+    ev = st["event"]
+    ctx = dict(scenario_name=sc["name"], band=st["risk"]["band"], is_simulation=sc["kind"] != "live",
+               area=ev["area"], area_lost_share=ev["area_share"], home_lost_share=ev["home_share"],
+               confidence=st["confidence"]["level"],
+               confidence_reason=" ".join(st["confidence"]["notes"]) or "Within the range of storms the model was trained on.",
+               factors=factors[:5],
                estimate_label=est["label"] if est else None, cause_plain=cause, fixed_plain=fixed,
                delay_reason=delay, hazard=hazard, declared_needs=needs)
     comms = ai.communications(ctx)
@@ -261,9 +266,7 @@ def scenarios(user=Depends(current_user)):
 def weather(scenario: str = "live", user=Depends(current_user)):
     if scenario not in SCENARIOS:
         raise HTTPException(404)
-    h = weather_for(scenario)
-    step = 1 if h.hours <= 240 else 2
-    return h.to_json(step)
+    return display_weather(scenario)
 
 
 @app.get("/api/sim/overview")
@@ -274,6 +277,13 @@ def sim_overview(p: simulate.Params = Depends(params), user=Depends(current_user
 @app.get("/api/sim/cells")
 def sim_cells(p: simulate.Params = Depends(params), user=Depends(current_user)):
     return views.cells(sim(p))
+
+
+@app.get("/api/sim/areas")
+def sim_areas(hour: float | None = None, p: simulate.Params = Depends(params), user=Depends(current_user)):
+    """% without power by ZIP for any signed-in user (circuits are internal: AEP route only)."""
+    a = views.area_outages(sim(p), hour)
+    return dict(hour=a["hour"], zip=a["zip"])
 
 
 @app.get("/api/sim/frames")
@@ -289,20 +299,43 @@ def sim_frames(p: simulate.Params = Depends(params), user=Depends(current_user))
 @app.get("/api/me/status")
 def my_status(p: simulate.Params = Depends(params), user=Depends(require_customer)):
     prof = _profile(user["id"])
-    prefs = dict(alerts_sms=prof["alerts_sms"], alerts_inapp=prof["alerts_inapp"], phone=prof["phone_enc"])
+    prefs = dict(alerts_sms=prof["alerts_sms"], alerts_inapp=prof["alerts_inapp"],
+                 phone=prof["phone_enc"] if prof["phone_verified"] else None)
     out = customer_view(sim(p), _premise_idx(prof["premise"]), prof["needs"], prefs)
     pidx = _premise_idx(prof["premise"])
     pr = grid().prem.iloc[pidx]
     out["home"] = dict(lon=round(float(pr.lon), 4), lat=round(float(pr.lat), 4))  # own premise only
+    out["address"] = decrypt(prof["address_enc"])  # the customer's own address, shown only to them
     return out
+
+
+@app.get("/api/me/prepare")
+def my_prepare(p: simulate.Params = Depends(params), user=Depends(require_customer)):
+    """Preparation guidance scaled to this home's risk band (Claude picks and words from approved tips)."""
+    prof = _profile(user["id"])
+    res = sim(p)
+    st = views.premise_status(res, _premise_idx(prof["premise"]))
+    sc = res["scenario"]
+    hazard = sc["rules"][0] if sc.get("rules") else sc.get("hazard", "wind")
+    est = st["restoration"]
+    band = st["risk"]["band"]
+    tips = guidance.preparation(band, hazard, est["p50"] if est else None, st["risk"]["weather"], prof["needs"],
+                                st["premise"]["service"])
+    plan = ai.preparation_plan(dict(scenario_name=sc["name"], band=band, hazard=hazard,
+                                    estimate_label=est["label"] if est else None,
+                                    weather=st["risk"]["weather"], declared_needs=prof["needs"],
+                                    tips={k: tips[k] for k in ("now", "if_out", "your_needs")}))
+    return dict(band=band, scenario=sc["name"], emergency=tips["emergency"], plan=plan,
+                estimate=est["label"] if est else None)
 
 
 @app.get("/api/me/profile")
 def my_profile(user=Depends(require_customer)):
     p = _profile(user["id"])
     return dict(name=user["name"], email=user["email"], address=decrypt(p["address_enc"]), zip=decrypt(p["zip_enc"]),
-                phone=decrypt(p["phone_enc"]), needs=p["needs"], alerts_sms=bool(p["alerts_sms"]),
-                alerts_inapp=bool(p["alerts_inapp"]),
+                phone=decrypt(p["phone_enc"]), phone_verified=bool(p["phone_verified"]), needs=p["needs"],
+                alerts_sms=bool(p["alerts_sms"]), alerts_inapp=bool(p["alerts_inapp"]),
+                sms_live=bool(TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM),
                 stored=dict(encrypted=["address", "ZIP code", "phone", "declared needs"],
                             plain=["name", "email", "anonymized premise link", "alert preferences"],
                             never_shared_with_ai=["name", "email", "address", "phone", "exact location"]))
@@ -319,7 +352,11 @@ class Prefs(BaseModel):
 def update_profile(body: Prefs, user=Depends(require_customer)):
     sets, vals = [], []
     if body.phone is not None:
-        sets.append("phone_enc = ?"), vals.append(encrypt(body.phone or None))
+        phone = normalize_phone(body.phone) if body.phone else None
+        if body.phone and not phone:
+            raise HTTPException(422, "Enter a US mobile number, e.g. 540-555-0100")
+        sets.append("phone_enc = ?"), vals.append(encrypt(phone))
+        sets.append("phone_verified = ?"), vals.append(0)  # a new number must be verified again
     if body.needs is not None:
         sets.append("needs_enc = ?"), vals.append(encrypt(json.dumps([n for n in body.needs if n in ALLOWED_NEEDS])))
     if body.alerts_sms is not None:
@@ -329,6 +366,61 @@ def update_profile(body: Prefs, user=Depends(require_customer)):
     if sets:
         with db.tx() as con:
             con.execute(f"UPDATE customer_profiles SET {', '.join(sets)} WHERE user_id = ?", (*vals, user["id"]))
+    return my_profile(user)
+
+
+def normalize_phone(raw: str) -> str | None:
+    """US numbers to E.164 (+1XXXXXXXXXX); other countries if given with a leading +."""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if raw.strip().startswith("+") and 8 <= len(digits) <= 15:
+        return "+" + digits
+    if len(digits) == 10:
+        digits = "1" + digits
+    if len(digits) == 11 and digits[0] == "1" and digits[1] not in "01":
+        return "+" + digits
+    return None
+
+
+class PhoneCode(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+@app.post("/api/me/phone/send-code")
+def phone_send_code(user=Depends(require_customer)):
+    """Text a 6-digit code to the saved number. Twilio if configured, otherwise simulated (dev mailbox)."""
+    p = _profile(user["id"])
+    phone = decrypt(p["phone_enc"])
+    if not phone:
+        raise HTTPException(422, "Save a mobile number first")
+    code = f"{secrets.randbelow(10 ** 6):06d}"
+    with db.tx() as con:
+        con.execute("INSERT INTO phone_codes(user_id, code_hash, expires, attempts) VALUES (?,?,?,0) "
+                    "ON CONFLICT(user_id) DO UPDATE SET code_hash = excluded.code_hash, expires = excluded.expires, "
+                    "attempts = 0", (user["id"], hash_token(code), time.time() + 600))
+    text = f"AEP Outage Concierge: your verification code is {code}. It expires in 10 minutes."
+    channel = _send_sms(phone, text)
+    if channel != "SMS":  # simulated or failed: show it in the dev mailbox so the flow can still be tested
+        with db.tx() as con:
+            con.execute("INSERT INTO mailbox(to_email, subject, body, created) VALUES (?,?,?,?)",
+                        (f"SMS to {phone}", "Phone verification code", text, time.time()))
+    db.audit(user["id"], "phone_code_sent", dict(channel=channel))
+    return dict(channel=channel, simulated=channel != "SMS")
+
+
+@app.post("/api/me/phone/verify")
+def phone_verify(body: PhoneCode, user=Depends(require_customer)):
+    with db.tx() as con:
+        row = con.execute("SELECT * FROM phone_codes WHERE user_id = ?", (user["id"],)).fetchone()
+        if row is None or row["expires"] < time.time():
+            raise HTTPException(400, "The code has expired. Send a new one.")
+        if row["attempts"] >= 5:
+            raise HTTPException(429, "Too many tries. Send a new code.")
+        if hash_token(body.code) != row["code_hash"]:
+            con.execute("UPDATE phone_codes SET attempts = attempts + 1 WHERE user_id = ?", (user["id"],))
+            raise HTTPException(400, "That code doesn't match.")
+        con.execute("UPDATE customer_profiles SET phone_verified = 1 WHERE user_id = ?", (user["id"],))
+        con.execute("DELETE FROM phone_codes WHERE user_id = ?", (user["id"],))
+    db.audit(user["id"], "phone_verified")
     return my_profile(user)
 
 
@@ -506,7 +598,7 @@ def aep_send_alerts(p: simulate.Params = Depends(params), user=Depends(require_a
         custs = con.execute("SELECT u.id, c.* FROM users u JOIN customer_profiles c ON c.user_id = u.id").fetchall()
     for c in custs:
         needs = json.loads(decrypt(c["needs_enc"]) or "[]") if c["needs_enc"] else []
-        phone = decrypt(c["phone_enc"])
+        phone = decrypt(c["phone_enc"]) if c["phone_verified"] else None  # texts only to verified numbers
         prefs = dict(alerts_sms=c["alerts_sms"], alerts_inapp=c["alerts_inapp"], phone=phone)
         v = customer_view(res, _premise_idx(c["premise"]), needs, prefs)
         band = v["risk"]["band"]
@@ -560,12 +652,19 @@ def aep_model(user=Depends(require_aep)):
     m = risk.model().meta
     return dict(features=[dict(name=n, label=l, coef=c) for n, l, c in zip(m["features"], m["labels"], m["coef"])],
                 intercept=m["intercept"], validation=m["validation"], train_range=m["train_range"],
-                trained_on=m["trained_on"], damage_records=m["damage_records"], excluded_days=m["excluded_days"],
-                wind_calibration=m.get("wind_calibration"), mixes=m["mixes"],
+                trained_on=m["trained_on"], damage_records=m["damage_records"],
+                training_storms=m.get("training_storms", []), hazard_behaviour=m.get("hazard_behaviour", {}),
+                excluded_records=m.get("excluded_records", {}), mixes=m["mixes"],
+                scenarios=[dict(name=s["name"], learned_from=s.get("learned_from")) for s in SCENARIOS.values()
+                           if s.get("learned_from")],
                 assumptions=[
-                    "Damage records come from AEP's ARCOS extract; severe-weather days with no records are treated as "
-                    "unlabeled because the extract appears to cover selected events only.",
-                    "Wind-driven days are scaled by an in-sample calibration factor so real wind events match.",
+                    "Trained only on the two well-recorded local storms - Feb 2025 (freezing rain, then wind) and "
+                    "Hurricane Helene (rain + wind) - with about a month of surrounding days so the model also sees "
+                    "calm weather. January damage records are excluded.",
+                    "Each storm type in the simulation borrows what the damage reports showed for the closest training "
+                    "hazard: which equipment breaks, how often crews hit access problems, and special equipment needs.",
+                    "With only one storm of each kind, the model cannot fully separate ice from heavy rain; hold-out "
+                    "tests that hide one storm show this, so treat other storm types as indicative.",
                     "Weather is ERA5-based reanalysis on a ~10 km grid; it smooths thunderstorm gusts. Each ~2 km "
                     "area's temperature is corrected for its elevation (6.5 C per km) when deciding where rain "
                     "freezes, since ridges ice up while the valley stays above freezing.",

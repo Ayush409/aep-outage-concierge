@@ -200,3 +200,61 @@ def live() -> Hourly:
     h = Hourly(payload["time"], {k: np.array(v, dtype=float) for k, v in payload["vars"].items()})
     _live.update(t=time.time(), h=h)
     return h
+
+
+# ------------------------------------------------------------------ map display grid
+# Larger grid used only for drawing weather on the maps (covers everything customers can pan to).
+DISPLAY_GRID = dict(nx=15, ny=11, lon0=-80.65, lat0=36.75, step=0.1)
+MODEL_GRID = dict(nx=len(GRID_LON), ny=len(GRID_LAT), lon0=float(GRID_LON[0]), lat0=float(GRID_LAT[0]), step=0.1)
+_live_display = {"t": 0.0, "h": None}
+
+
+def display_points(grid: dict) -> list[tuple[float, float]]:
+    return [(round(grid["lon0"] + i * grid["step"], 2), round(grid["lat0"] + j * grid["step"], 2))
+            for j in range(grid["ny"]) for i in range(grid["nx"])]
+
+
+_display_cache: dict = {}
+
+
+def display_event(eid: str):
+    """(Hourly, grid) for a scenario's weather on the display grid; falls back to the model grid.
+
+    Only the full display grid is cached, so a display file that arrives later is picked up without a restart.
+    """
+    if eid in _display_cache:
+        return _display_cache[eid]
+    path = WEATHER / f"display_{eid}.json"
+    if not path.exists():
+        return event(eid), MODEL_GRID
+    d = json.loads(path.read_text())
+    _display_cache[eid] = (Hourly(d["time"], d["vars"]), d["grid"])
+    return _display_cache[eid]
+
+
+def display_live():
+    """Live forecast on the display grid (cached 30 min); falls back to the model-grid forecast."""
+    if _live_display["h"] is not None and time.time() - _live_display["t"] < 1800:
+        return _live_display["h"]
+    pts = display_points(DISPLAY_GRID)
+    try:
+        r = httpx.get("https://api.open-meteo.com/v1/forecast", timeout=90, params=dict(
+            latitude=",".join(str(p[1]) for p in pts), longitude=",".join(str(p[0]) for p in pts),
+            hourly=",".join(FULL_VARS), past_days=1, forecast_days=7, wind_speed_unit="mph",
+            temperature_unit="fahrenheit", precipitation_unit="inch", timezone="America/New_York"))
+        r.raise_for_status()
+        locs = r.json()
+        locs = locs if isinstance(locs, list) else [locs]
+        h = Hourly(locs[0]["hourly"]["time"], {k: np.array([loc["hourly"][k] for loc in locs], dtype=float)
+                                               for k in FULL_VARS})
+        out = (h, DISPLAY_GRID)
+    except Exception:
+        out = (live(), MODEL_GRID)
+    _live_display.update(t=time.time(), h=out)
+    return out
+
+
+def grid_json(h: "Hourly", grid: dict, step: int = 1) -> dict:
+    idx = np.arange(0, h.hours, step)
+    return dict(time=[t.isoformat() for t in h.time.iloc[idx]], grid=grid,
+                vars={k: np.round(h.f[k][:, idx], 1).tolist() for k in FULL_VARS})

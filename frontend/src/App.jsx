@@ -1,5 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { api } from "./api.js";
 import { Login, Register, Forgot, Reset, Mailbox } from "./pages/Auth.jsx";
 import CustomerMap from "./pages/CustomerMap.jsx";
@@ -18,8 +18,8 @@ const Ctx = createContext(null);
 export const useApp = () => useContext(Ctx);
 
 const CUSTOMER_TABS = [
-  ["/map", "Map"], ["/status", "My Status"], ["/prepare", "Prepare"], ["/alerts", "Alerts"],
-  ["/simulation", "Simulation"], ["/data", "My Data & Privacy"],
+  ["/status", "My Status"], ["/map", "Map"], ["/prepare", "Prepare"], ["/alerts", "Alerts"],
+  ["/data", "My Data & Privacy"],
 ];
 const AEP_TABS = [
   ["/ops", "Ops Map"], ["/restoration", "Restoration Planner"], ["/impact", "Business Impact"],
@@ -29,8 +29,8 @@ const AEP_TABS = [
 export default function App() {
   const [user, setUser] = useState(undefined);
   const [scenarios, setScenarios] = useState([]);
-  const [scenario, setScenario] = useState(null);
-  const [active, setActive] = useState(null);
+  // one selection drives every tab: the live 7-day forecast (default) or a storm simulation
+  const [scenario, setScenario] = useState("live");
   const [bandOutcomes, setBandOutcomes] = useState({});
 
   const refresh = useCallback(async () => {
@@ -40,8 +40,6 @@ export default function App() {
       const sc = await api("/api/scenarios");
       setScenarios(sc.scenarios);
       setBandOutcomes(sc.band_outcomes || {});
-      setActive(sc.active);
-      setScenario((s) => s || sc.active);
     } catch {
       setUser(null);
     }
@@ -51,7 +49,7 @@ export default function App() {
   if (user === undefined) return <div className="auth"><div className="card">Loading...</div></div>;
 
   const home = user?.role === "aep" ? "/ops" : "/status";
-  const ctx = { user, refresh, scenarios, scenario, setScenario, active, setActive, bandOutcomes };
+  const ctx = { user, refresh, scenarios, scenario, setScenario, bandOutcomes };
 
   return (
     <Ctx.Provider value={ctx}>
@@ -72,11 +70,24 @@ export default function App() {
 }
 
 function Shell() {
-  const { user, scenarios, scenario, setScenario, active, refresh } = useApp();
+  const { user, refresh, scenarios, scenario, setScenario } = useApp();
+  const location = useLocation();
+  const [toasts, setToasts] = useState([]);
+  const first = useRef(true);
+  // pop a toast whenever the forecast / simulation selection changes
+  useEffect(() => {
+    if (first.current) { first.current = false; return undefined; }
+    const sc = scenarios.find((x) => x.id === scenario);
+    const id = Date.now();
+    const text = scenario === "live" ? "Back to the live 7-day forecast" : `Simulation: ${sc?.name} - every tab now shows this storm`;
+    setToasts((t) => [...t, { id, text, sim: scenario !== "live" }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3200);  // each toast dismisses itself
+    return undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scenario]);
   const nav = useNavigate();
   const aep = user.role === "aep";
   const tabs = aep ? AEP_TABS : CUSTOMER_TABS;
-  const sc = scenarios.find((s) => s.id === scenario);
 
   async function logout() {
     await api("/api/auth/logout", { method: "POST" });
@@ -87,53 +98,57 @@ function Shell() {
   return (
     <div className="shell">
       <header className="topbar">
-        <div className="logo">AEP Outage Concierge<small>{aep ? "Operations" : "Customer"}</small></div>
+        <div className="logo"><span className="logo-mark" aria-hidden="true">⚡</span>AEP Outage Concierge<small>{aep ? "Operations" : "Customer"}</small></div>
         <nav className="tabs" aria-label="Sections">
           {tabs.map(([to, label]) => (
             <NavLink key={to} to={to} className={({ isActive }) => (isActive ? "active" : "")}>{label}</NavLink>
           ))}
         </nav>
         <div className="who">
+          <select className="mode-select" value={scenario} onChange={(e) => setScenario(e.target.value)}
+            aria-label="Forecast or storm simulation">
+            {scenarios.map((s) => (
+              <option key={s.id} value={s.id}>{s.id === "live" ? "Live forecast - next 7 days" : `Simulation: ${s.name}`}</option>
+            ))}
+          </select>
           <span>{user.name}</span>
           <button className="ghost" onClick={logout}>Sign out</button>
         </div>
       </header>
-      <div className="scenario-banner">
-        <span className="muted">Viewing</span>
-        <select value={scenario || ""} onChange={(e) => setScenario(e.target.value)} style={{ width: "auto" }}
-          aria-label="Scenario">
-          {scenarios.map((s) => (
-            <option key={s.id} value={s.id}>{s.name}{s.id === active ? " (active event)" : ""}</option>
-          ))}
-        </select>
-        {sc && <span className="tag">{sc.kind === "replay" ? "Real event replay" : sc.kind === "live" ? "Live" :
-          "What-if simulation"}</span>}
-        {sc?.date && <span className="muted small">{sc.date}</span>}
-        <span className="muted small" style={{ flex: 1, minWidth: 200 }}>{sc?.summary}</span>
+      {scenario !== "live" && (
+        <div className="sim-banner" role="status">
+          <b>Simulation mode</b>
+          <span>{scenarios.find((s) => s.id === scenario)?.summary}</span>
+          <button className="chip" onClick={() => setScenario("live")}>Back to live forecast</button>
+        </div>
+      )}
+      <div className="route-anim" key={location.pathname}>
+        <Routes>
+          {aep ? (
+            <>
+              <Route path="/ops" element={<OpsMap />} />
+              <Route path="/restoration" element={<Restoration />} />
+              <Route path="/impact" element={<Impact />} />
+              <Route path="/comms" element={<Comms />} />
+              <Route path="/simulation" element={<Simulation />} />
+              <Route path="/model" element={<ModelAudit />} />
+              <Route path="*" element={<Navigate to="/ops" />} />
+            </>
+          ) : (
+            <>
+              <Route path="/map" element={<CustomerMap />} />
+              <Route path="/status" element={<MyStatus />} />
+              <Route path="/prepare" element={<Prepare />} />
+              <Route path="/alerts" element={<Alerts />} />
+              <Route path="/data" element={<MyData />} />
+              <Route path="*" element={<Navigate to="/status" />} />
+            </>
+          )}
+        </Routes>
       </div>
-      <Routes>
-        {aep ? (
-          <>
-            <Route path="/ops" element={<OpsMap />} />
-            <Route path="/restoration" element={<Restoration />} />
-            <Route path="/impact" element={<Impact />} />
-            <Route path="/comms" element={<Comms />} />
-            <Route path="/simulation" element={<Simulation />} />
-            <Route path="/model" element={<ModelAudit />} />
-            <Route path="*" element={<Navigate to="/ops" />} />
-          </>
-        ) : (
-          <>
-            <Route path="/map" element={<CustomerMap />} />
-            <Route path="/status" element={<MyStatus />} />
-            <Route path="/prepare" element={<Prepare />} />
-            <Route path="/alerts" element={<Alerts />} />
-            <Route path="/simulation" element={<Simulation />} />
-            <Route path="/data" element={<MyData />} />
-            <Route path="*" element={<Navigate to="/status" />} />
-          </>
-        )}
-      </Routes>
+      <div className="toasts" aria-live="polite">
+        {toasts.map((t) => <div key={t.id} className={`toast${t.sim ? " sim" : ""}`}>{t.text}</div>)}
+      </div>
     </div>
   );
 }

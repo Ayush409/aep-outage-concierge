@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS notifications (
   escalation INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS phone_codes (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  code_hash TEXT NOT NULL, expires REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT NOT NULL, detail TEXT, ts REAL NOT NULL
 );
@@ -50,7 +54,7 @@ CREATE TABLE IF NOT EXISTS audit (
 
 DEFAULT_SETTINGS = {
     "customer_alert_threshold": "Elevated",
-    "active_scenario": "feb_2025",
+    "active_scenario": "live",
     "life_support_one_band_lower": "1",
 }
 
@@ -75,6 +79,9 @@ def tx():
 def init():
     with tx() as con:
         con.executescript(SCHEMA)
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(customer_profiles)")}
+        if "phone_verified" not in cols:  # added after the first release
+            con.execute("ALTER TABLE customer_profiles ADD COLUMN phone_verified INTEGER NOT NULL DEFAULT 0")
         for k, v in DEFAULT_SETTINGS.items():
             con.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
 

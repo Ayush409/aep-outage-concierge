@@ -18,7 +18,7 @@ FEATURES = [
     ("wind_30", "Wind gusts above 30 mph"),
     ("wind_45", "Wind gusts above 45 mph"),
     ("wind_hours", "Hours of 40+ mph gusts"),
-    ("ice", "Freezing rain (ice on lines and trees)"),
+    ("ice", "Ice or heavy wet snow on lines and trees"),
     ("snow", "Snow load"),
     ("soil", "Soaked ground (trees uproot more easily)"),
     ("wind_soil", "Wind on soaked ground"),
@@ -31,10 +31,11 @@ FEATURES = [
 
 @lru_cache(maxsize=1)
 def history_density() -> np.ndarray:
-    """log(1 + damage records per 100 poles) per cell, from all ARCOS records."""
+    """log(1 + damage records per 100 poles) per cell, from ARCOS records (January records excluded)."""
     g = grid()
     pos = {c: i for i, c in enumerate(g.cell_ids)}
-    n = np.bincount(g.damage.cell.map(pos).to_numpy(), minlength=len(g.cells))
+    d = g.damage[pd.to_datetime(g.damage.report_date).dt.month != 1]
+    n = np.bincount(d.cell.map(pos).to_numpy(), minlength=len(g.cells))
     return np.log1p(100 * n / (g.cells.poles.to_numpy() + 1))
 
 
@@ -120,13 +121,18 @@ def exposure(cells: pd.DataFrame) -> np.ndarray:
     return cells.poles.to_numpy() + 1.0
 
 
-def expected_damage(hourly) -> tuple[np.ndarray, pd.DataFrame, np.ndarray]:
+def expected_damage(hourly, snow_ice_equiv: float = 0.0) -> tuple[np.ndarray, pd.DataFrame, np.ndarray]:
     """Expected damage count per cell summed over the window, plus per-cell factor contributions.
 
+    snow_ice_equiv: inches of ice-equivalent load per inch of wet snow (snow-storm assumption that
+    reuses what the model learned from freezing rain).
     Returns (lambda per cell, feature frame, contributions per cell [peak day]).
     """
     g = grid()
     f = cell_day_features(hourly)
+    if snow_ice_equiv:
+        wet = (f.tmin.to_numpy() >= 20) & (f.tmax.to_numpy() <= 38)  # heavy, sticky snow near freezing
+        f["frz"] = f.frz.to_numpy() + snow_ice_equiv * np.where(wet, f.snow.to_numpy(), 0.0)
     X = design(f, g.cells)
     m = model()
     lam_rows = m.rate(X, exposure(g.cells)[f.cellpos.to_numpy()]) * wind_adjustment(f, m)

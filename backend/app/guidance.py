@@ -78,7 +78,7 @@ def preparation(band: str, hazard: str, est_hours: float | None, weather: dict, 
     if "mobility" in needs:
         tips["your_needs"].append("Arrange help from a neighbor or family member in case you need to leave home.")
     if "hearing_vision" in needs:
-        tips["your_needs"].append("We'll send alerts by text as well as in the app so you don't miss them.")
+        tips["your_needs"].append("Keep text alerts on (and a verified number in My Data) as well as in-app alerts, so updates aren't missed.")
     return tips
 
 

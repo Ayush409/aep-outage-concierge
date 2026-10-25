@@ -1,10 +1,14 @@
-"""Train and validate the damage-rate model.
+"""Train and validate the damage-rate model on the two well-recorded local storms.
 
-- Target: ARCOS damage records per grid cell per day (report date), Oct 2022 -> now.
-- Features: archive weather on the cell's weather point + cell exposure (see engines/risk.py).
-- Validation: hold out Feb 2025, train on everything else, predict it; then the same for Helene.
-  Reports event totals, cell-level rank correlation, premise-level outage AUC and reliability by band.
-- Final model is refit on all days and saved to data/processed/risk_model.json.
+- Training storms: Feb 2025 (ice phase Feb 11-15, wind phase Feb 16-18) and Hurricane Helene
+  (rain + wind, Sep 25 - Oct 2 2024). Each window includes a few calm lead-in/trailing days.
+- Target: ARCOS damage records per grid cell per day (report date). January records are excluded.
+- Features: Open-Meteo archive weather on the cell's weather point + cell exposure (engines/risk.py).
+- Per-hazard behaviour learned from the damage reports (what breaks, access problems, special
+  equipment) is saved for the simulation to apply to other storm types.
+- Validation (only two storms exist): train on Feb 2025 -> predict Helene; train on Feb ice +
+  Helene -> predict the Feb wind phase. The Feb ice phase is the only ice event, so it can't be held out.
+- Final model is fit on both storms and saved to data/processed/risk_model.json.
 
 Run:  .venv/Scripts/python scripts/train_model.py
 """
@@ -24,23 +28,29 @@ from app.engines import risk  # noqa: E402
 from app.engines.data import PROCESSED, grid  # noqa: E402
 from app.engines.weather import history  # noqa: E402
 
-HAZARD_EVENTS = {
-    "ice": ["feb_2025_ice", "winter_storm_2025_01"],
-    "wind": ["feb_2025_wind", "minor_wind_2025", "wind_2024_11", "wind_rain_2024_01", "storms_2024_04",
-             "storms_2024_05"],
-    "tropical": ["helene_2024", "helene_late_reports", "debby_remnants_2024_08"],
+# Training windows (inclusive)
+WINDOWS = {
+    "feb_2025": ("2025-02-01", "2025-03-03"),
+    "helene_2024": ("2024-09-08", "2024-10-20"),
 }
+HAZARD_EVENTS = {  # what each hazard looks like in the damage reports
+    "ice": ["feb_2025_ice"],
+    "wind": ["feb_2025_wind"],
+    "tropical": ["helene_2024", "helene_late_reports"],
+}
+TRAIN_EVENTS = sum(HAZARD_EVENTS.values(), [])
+# hold-out tests: name -> (days held out, damage events held out, label for the UI)
 HOLDOUTS = {
-    "feb_2025": ("2025-02-10", "2025-02-20", ["feb_2025_ice", "feb_2025_wind"]),
-    "helene_2024": ("2024-09-25", "2024-10-03", ["helene_2024", "helene_late_reports"]),
-    "winter_2025_01": ("2025-01-04", "2025-01-08", ["winter_storm_2025_01"]),
+    "helene_2024": (("2024-09-08", "2024-10-20"), ["helene_2024", "helene_late_reports"],
+                    "Trained on Feb 2025 (ice + wind) only, then predicted Hurricane Helene (rain + wind)"),
+    "feb_2025_wind": (("2025-02-16", "2025-03-03"), ["feb_2025_wind"],
+                      "Trained on the Feb 2025 ice phase + Helene, then predicted the Feb 2025 wind phase"),
 }
-# Storms with enough records to calibrate the damage -> outage step: (events, hazard mix)
+# damage -> outage calibration storms: (events, hazard mix)
 OUTAGE_CALIB = {
-    "feb_2025": (["feb_2025_ice", "feb_2025_wind"], "ice"),
+    "feb_2025_ice": (["feb_2025_ice"], "ice"),
+    "feb_2025_wind": (["feb_2025_wind"], "wind"),
     "helene_2024": (["helene_2024", "helene_late_reports"], "tropical"),
-    "winter_2025_01": (["winter_storm_2025_01"], "ice"),
-    "minor_wind_2025": (["minor_wind_2025"], "wind"),
 }
 
 
@@ -79,20 +89,21 @@ def main():
     log("building daily features ...")
     f = risk.cell_day_features(history())
     f = f.dropna(subset=["gust_max"]).reset_index(drop=True)
+    in_window = np.zeros(len(f), bool)
+    for a, b in WINDOWS.values():
+        in_window |= ((f.day >= a) & (f.day <= b)).to_numpy()
+    f = f[in_window].reset_index(drop=True)
     dmg = g.damage.copy()
     dmg["day"] = pd.to_datetime(dmg.report_date)
+    jan = dmg.day.dt.month == 1
+    log("dropping January damage records:", int(jan.sum()))
+    all_dmg = dmg[~jan].copy()  # every non-January record (for the "past damage nearby" prior)
+    dmg = all_dmg[all_dmg.event.isin(TRAIN_EVENTS)].copy()
     cellpos = {c: i for i, c in enumerate(g.cell_ids)}
     dmg["cellpos"] = dmg.cell.map(cellpos)
+    all_dmg["cellpos"] = all_dmg.cell.map(cellpos)
     y_counts = dmg.groupby(["cellpos", "day"]).size()
     f["y"] = y_counts.reindex(pd.MultiIndex.from_arrays([f.cellpos, f.day])).fillna(0).to_numpy()
-    # Data-quality rule: the ARCOS extract has no records for some clearly severe days (e.g. the
-    # Jan 25-27 2026 ice storm). Days with severe area-wide weather but zero records are treated as
-    # unlabeled (excluded), not as "no damage". Calm and moderate days stay in as negatives.
-    area = f.groupby("day").agg(gust=("gust_max", "mean"), frz=("frz", "mean"), y=("y", "sum"))
-    severe_unlabeled = area[((area.gust >= 45) | (area.frz >= 0.3)) & (area.y == 0)].index
-    f = f[~f.day.isin(severe_unlabeled)].reset_index(drop=True)
-    log("excluded severe days with no records:", len(severe_unlabeled),
-        [str(d.date()) for d in severe_unlabeled[:12]])
     expo = risk.exposure(g.cells)[f.cellpos.to_numpy()]
     log("rows", len(f), "damage in window", int(f.y.sum()), "of", len(dmg))
 
@@ -101,9 +112,10 @@ def main():
     ev_of_day = dmg.groupby("day").event.agg(lambda s: s.mode().iloc[0])
     f["event"] = ev_of_day.reindex(f.day).fillna("").to_numpy()
     ncell = len(g.cells)
-    events = sorted(dmg.event.unique())
+    events = sorted(all_dmg.event.unique())
     cnt = np.zeros((ncell, len(events)))
-    np.add.at(cnt, (dmg.cellpos.to_numpy(), dmg.event.map({e: i for i, e in enumerate(events)}).to_numpy()), 1)
+    np.add.at(cnt, (all_dmg.cellpos.to_numpy(),
+                    all_dmg.event.map({e: i for i, e in enumerate(events)}).to_numpy()), 1)
     poles = g.cells.poles.to_numpy() + 1
 
     def hist_rows(exclude: list[str]):
@@ -121,17 +133,6 @@ def main():
     def rate(m, X):
         return np.minimum(np.exp(m.intercept_ + X @ m.coef_), risk.RiskModel.MAX_DAILY_SHARE) * expo
 
-    # Wind recalibration: many gusty days in the extract have no records, which drags the wind
-    # response down (in-sample, wind events come out 3-8x low). Scale wind-driven days so the
-    # training wind/tropical events match their observed totals (leaf-on factor applied first).
-    wind_day = ((f.frz < 0.1) & (f.gust_max >= 30)).to_numpy()
-    leaf_mult = np.where(f.day.dt.month.between(5, 10).to_numpy(), risk.LEAF_ON_FACTOR, 1.0)
-    wind_ev_day = f.event.isin(HAZARD_EVENTS["wind"] + HAZARD_EVENTS["tropical"]).to_numpy()
-
-    def wind_calibration(m, X, train_mask):
-        sel = train_mask & wind_day & wind_ev_day
-        return float(f.y.to_numpy()[sel].sum() / max((rate(m, X) * leaf_mult)[sel].sum(), 1e-9))
-
     def hazard_mixes(d):
         out = {hz: d[d.event.isin(evs)].asset_type.value_counts(normalize=True).round(4).to_dict()
                for hz, evs in HAZARD_EVENTS.items()}
@@ -139,6 +140,17 @@ def main():
         return out
 
     mixes = hazard_mixes(dmg)
+
+    # what each hazard does, learned from its damage reports (applied to other storm types)
+    behaviour = {}
+    for hz, evs in HAZARD_EVENTS.items():
+        sub = dmg[dmg.event.isin(evs)]
+        rd = sub.repair_days.dropna()
+        rd = rd[(rd >= 0) & (rd <= 14)]
+        behaviour[hz] = dict(records=int(len(sub)), access_rate=round(float((sub.access_issue == "Yes").mean()), 3),
+                             special_equipment_rate=round(float(sub.special_equipment.fillna("").ne("").mean()), 3),
+                             median_repair_days=float(rd.median()) if len(rd) else None, mix=mixes[hz])
+    log("hazard behaviour", {k: {kk: vv for kk, vv in v.items() if kk != "mix"} for k, v in behaviour.items()})
 
     def outage_step(exclude: list[str]):
         """Placement table + outage calibration fitted on real damage, leaving out `exclude` events."""
@@ -155,19 +167,18 @@ def main():
         return dict(placement=placement, cluster_size=risk.fit_cluster_size(events, placement)), mx
 
     validation = {}
-    for name, (a, b, evs) in HOLDOUTS.items():
+    for name, ((a, b), evs, label) in HOLDOUTS.items():
         hold = (f.day >= a) & (f.day <= b)
         X = risk.design(f, g.cells, hist_rows(evs))
         m = fit(~hold.to_numpy(), X)
-        c = wind_calibration(m, X, ~hold.to_numpy())
-        lam_rows = (rate(m, X) * np.where(wind_day, c * leaf_mult, 1.0))[hold.to_numpy()]
+        lam_rows = rate(m, X)[hold.to_numpy()]
         sub = f[hold].assign(lam=lam_rows)
         lam_cell = np.bincount(sub.cellpos, weights=sub.lam, minlength=len(g.cells))
         act_cell = np.bincount(sub.cellpos, weights=sub.y, minlength=len(g.cells))
         rho = spearmanr(lam_cell, act_cell).statistic
         # premise-level outage: predicted probability vs. downstream of a real damaged device
         outage, fold_mixes = outage_step(evs)
-        mix = fold_mixes[OUTAGE_CALIB[name][1]]
+        mix = fold_mixes.get(OUTAGE_CALIB[name][1]) or fold_mixes["all"]  # no leak of the held-out mix
         p_out = risk.premise_outage_prob(risk.device_rates(lam_cell, mix, placement=outage["placement"]),
                                          outage["cluster_size"])
         real = dmg[dmg.event.isin(evs)]
@@ -180,7 +191,7 @@ def main():
                    customers=int(d.w.sum()), predicted=float(np.average(d.p, weights=d.w)),
                    actual=float(np.average(d.out, weights=d.w)))), include_groups=False))
         validation[name] = dict(
-            trained_without=name, predicted_damage=round(float(lam_cell.sum()), 1),
+            trained_without=name, label=label, predicted_damage=round(float(lam_cell.sum()), 1),
             actual_damage=int(act_cell.sum()), cell_rank_corr=round(float(rho), 3),
             premise_auc=round(float(auc), 3),
             predicted_customers_out=int((p_out * cust).sum()), actual_customers_out=int(cust[actual_out].sum()),
@@ -222,8 +233,6 @@ def main():
 
     X = risk.design(f, g.cells, hist_rows([]))
     m = fit(np.ones(len(f), bool), X)
-    c_wind = wind_calibration(m, X, np.ones(len(f), bool))
-    log("wind calibration factor", round(c_wind, 2))
     outage, _ = outage_step([])
     log("outage step", {k: v for k, v in outage.items() if k != "placement"})
     rng = dict(gust_max=float(f.gust_max.max()), frz=float(f.frz.max()), snow=float(f.snow.max()),
@@ -231,8 +240,9 @@ def main():
     out = dict(coef=m.coef_.round(5).tolist(), intercept=round(float(m.intercept_), 5),
                features=[k for k, _ in risk.FEATURES], labels=[l for _, l in risk.FEATURES],
                mixes=mixes, outage=outage, validation=validation, band_outcomes=band_outcomes, train_range=rng,
-               trained_on=f"{f.day.min().date()} to {f.day.max().date()}", rows=int(len(f)),
-               damage_records=int(f.y.sum()), wind_calibration=round(c_wind, 3), leaf_on_factor=risk.LEAF_ON_FACTOR, excluded_days=[str(d.date()) for d in severe_unlabeled])
+               trained_on="Feb 1 - Mar 3, 2025 and Sep 8 - Oct 20, 2024", training_storms=list(WINDOWS),
+               rows=int(len(f)), damage_records=int(f.y.sum()), hazard_behaviour=behaviour,
+               excluded_records=dict(january=int(jan.sum())))
     risk.MODEL_PATH.write_text(json.dumps(out, indent=1))
     log("coefficients", dict(zip(out["features"], out["coef"])), "intercept", out["intercept"])
     log("saved", risk.MODEL_PATH)

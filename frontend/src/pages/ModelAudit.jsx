@@ -2,7 +2,9 @@ import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAx
 import { BANDS, fmt } from "../api.js";
 import { Loading, useFetch } from "../components/ui.jsx";
 
-const NAMES = { feb_2025: "Feb 2025 ice + wind storm", helene_2024: "Hurricane Helene" };
+const NAMES = { feb_2025_wind: "Feb 2025 wind phase", helene_2024: "Hurricane Helene" };
+const HAZARD = { ice: "Ice (Feb 2025 freezing rain)", wind: "Wind (Feb 2025 wind phase)",
+  tropical: "Rain + wind (Hurricane Helene)" };
 
 export default function ModelAudit() {
   const m = useFetch("/api/aep/model").data;
@@ -12,8 +14,10 @@ export default function ModelAudit() {
     <div className="page stack">
       <section className="card stack">
         <h2>Does the model work? Hold-out tests</h2>
-        <div className="small secondary">Each test trains on every other day and event, then predicts the held-out storm
-          it has never seen. Bands should rank risk: the higher the band, the more customers actually lost power.</div>
+        <div className="small secondary">The live model is trained on <b>both</b> storms. Each test below hides one storm
+          (or phase), trains on the rest, and predicts what it hid - the honest way to see how it handles a storm it hasn't
+          seen. With only one storm of each kind, these tests are hard: hiding one leaves the model no example of that
+          hazard.</div>
         <div className="grid cols-2">
           {Object.entries(m.validation).map(([k, v]) => <Holdout key={k} name={NAMES[k] || k} v={v} />)}
         </div>
@@ -27,18 +31,36 @@ export default function ModelAudit() {
             <tbody>{m.features.filter((f) => f.coef > 0).sort((a, b) => b.coef - a.coef).map((f) => (
               <tr key={f.name}><td>{f.label}</td><td className="num">{f.coef.toFixed(2)}</td></tr>))}</tbody></table>
           <div className="small muted">Zero-weight factors (dropped by the data): {m.features.filter((f) => f.coef === 0)
-            .map((f) => f.label).join(", ")}. Wind calibration factor: {m.wind_calibration}.</div>
+            .map((f) => f.label).join(", ")}.</div>
         </section>
         <section className="card stack">
           <h2>Assumptions and limits</h2>
           <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{m.assumptions.map((a) => <li key={a}>{a}</li>)}</ul>
-          <div className="small"><b>Severe days with no damage records</b> (treated as unlabeled): {m.excluded_days.length}
-            {" "}days, e.g. {m.excluded_days.slice(-4).join(", ")}.</div>
+          <div className="small"><b>Excluded:</b> {fmt.n(m.excluded_records?.january)} January damage records.</div>
           <div className="small"><b>Strongest weather in training:</b> gusts {fmt.n(m.train_range.gust_max)} mph, freezing rain
             {" "}{m.train_range.frz.toFixed(2)} in, low {fmt.n(m.train_range.tmin)} °F, high {fmt.n(m.train_range.tmax)} °F.
             Scenarios beyond this are flagged lower confidence.</div>
         </section>
       </div>
+      <section className="card stack">
+        <h2>What the damage reports taught us, by hazard</h2>
+        <div className="small muted">Applied to the simulation's storm types: which equipment breaks, how often crews hit
+          access problems (backyard poles, blocked roads), and how often special equipment is needed.</div>
+        <table>
+          <thead><tr><th>Hazard (training storm)</th><th className="num">Reports</th><th className="num">Access problems</th>
+            <th className="num">Special equipment</th><th>Most damaged</th></tr></thead>
+          <tbody>{Object.entries(m.hazard_behaviour || {}).map(([k, b]) => (
+            <tr key={k}><td>{HAZARD[k] || k}</td><td className="num">{fmt.n(b.records)}</td>
+              <td className="num">{Math.round(b.access_rate * 100)}%</td>
+              <td className="num">{Math.round(b.special_equipment_rate * 100)}%</td>
+              <td className="small">{Object.entries(b.mix).sort((x, y) => y[1] - x[1]).slice(0, 3)
+                .map(([t, v]) => `${t} ${Math.round(v * 100)}%`).join(", ")}</td></tr>))}</tbody>
+        </table>
+        <table>
+          <thead><tr><th>Simulation storm type</th><th>Uses what was learned from</th></tr></thead>
+          <tbody>{(m.scenarios || []).map((s) => <tr key={s.name}><td>{s.name}</td><td className="small">{s.learned_from}</td></tr>)}</tbody>
+        </table>
+      </section>
       <section className="card stack">
         <h2>Audit log</h2>
         {!audit ? <Loading /> : (
@@ -60,7 +82,8 @@ function Holdout({ name, v }) {
   }));
   return (
     <div className="card stack" style={{ boxShadow: "none" }}>
-      <b>{name} (never seen in training)</b>
+      <b>Hold-out test: {name}</b>
+      {v.label && <div className="small secondary">{v.label}.</div>}
       <table><tbody>
         <tr><td>Damage reports: predicted vs actual</td><td className="num">{fmt.n(v.predicted_damage)} vs {fmt.n(v.actual_damage)}</td></tr>
         <tr><td>Customers out: predicted vs behind real damage</td><td className="num">{fmt.n(v.predicted_customers_out)} vs {fmt.n(v.actual_customers_out)}</td></tr>

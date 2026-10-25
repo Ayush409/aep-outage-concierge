@@ -48,6 +48,9 @@ EVENTS = {
     "texas_freeze_2021": dict(start="2021-02-13", end="2021-02-20", origin=(-97.74, 30.27)),
     "heat_dome_2021": dict(start="2021-06-25", end="2021-07-01", origin=(-122.68, 45.52)),
     "tornado_2011": dict(start="2011-04-26", end="2011-04-29", origin=(-87.30, 33.40)),
+    # weather patterns for the generic snow-storm and arctic-cold scenarios (real local events)
+    "snow_2009_12": dict(start="2009-12-16", end="2009-12-21", origin=None),
+    "arctic_2022_12": dict(start="2022-12-21", end="2022-12-27", origin=None),
 }
 
 
@@ -114,15 +117,23 @@ def fetch_elevation():
     """
     import pandas as pd
 
+    if (OUT / "elevation.json").exists():
+        print("elevation cached")
+        return
     cells = pd.read_pickle(PROCESSED / "cells.pkl")
 
     def elev(lons, lats):
         out = []
         for i in range(0, len(lons), 100):
-            r = httpx.get("https://api.open-meteo.com/v1/elevation", timeout=60, params=dict(
-                latitude=",".join(f"{x:.4f}" for x in lats[i:i + 100]),
-                longitude=",".join(f"{x:.4f}" for x in lons[i:i + 100])))
+            for attempt in range(5):  # each coordinate counts against the per-minute quota
+                r = httpx.get("https://api.open-meteo.com/v1/elevation", timeout=60, params=dict(
+                    latitude=",".join(f"{x:.4f}" for x in lats[i:i + 100]),
+                    longitude=",".join(f"{x:.4f}" for x in lons[i:i + 100])))
+                if r.status_code != 429:
+                    break
+                time.sleep(30 * (attempt + 1))
             r.raise_for_status()
+            time.sleep(2)
             out += r.json()["elevation"]
         return out
 
@@ -156,9 +167,38 @@ def fetch_tornado_tracks():
     print("tornado tracks", len(tracks))
 
 
+# Map display grid: covers the whole area customers can pan to (MapView MAX_BOUNDS), 0.1 deg spacing.
+# The model keeps using the 7 x 6 service-area grid above; this one is only for drawing weather layers.
+DISPLAY_LON = np.round(np.arange(-80.65, -79.24, 0.1), 2)
+DISPLAY_LAT = np.round(np.arange(36.75, 37.76, 0.1), 2)
+DISPLAY = [(lon, lat) for lat in DISPLAY_LAT for lon in DISPLAY_LON]
+
+
+def fetch_event_display(eid, ev):
+    path = OUT / f"display_{eid}.json"
+    if path.exists():
+        print("display cached", eid)
+        return
+    dx, dy = (ev["origin"][0] - CENTER[0], ev["origin"][1] - CENTER[1]) if ev["origin"] else (0, 0)
+    src = [(round(lon + dx, 3), round(lat + dy, 3)) for lon, lat in DISPLAY]
+    d = get(dict(latitude=",".join(str(p[1]) for p in src), longitude=",".join(str(p[0]) for p in src),
+                 start_date=ev["start"], end_date=ev["end"], hourly=",".join(FULL_VARS), **UNITS))
+    d = d if isinstance(d, list) else [d]
+    out = dict(id=eid, time=d[0]["hourly"]["time"],
+               grid=dict(nx=len(DISPLAY_LON), ny=len(DISPLAY_LAT), lon0=float(DISPLAY_LON[0]),
+                         lat0=float(DISPLAY_LAT[0]), step=0.1),
+               vars={k: [[None if v is None else round(v, 1) for v in loc["hourly"][k]] for loc in d]
+                     for k in FULL_VARS})
+    path.write_text(json.dumps(out))
+    print("display saved", eid, len(DISPLAY), "points")
+    time.sleep(75)  # each location counts against the per-minute quota
+
+
 if __name__ == "__main__":
     fetch_elevation()
     fetch_tornado_tracks()
     for eid, ev in EVENTS.items():
         fetch_event(eid, ev)
     fetch_history()
+    for eid, ev in EVENTS.items():
+        fetch_event_display(eid, ev)

@@ -4,34 +4,36 @@ import { Band, ErrorBox, Kind, Loading, useFetch } from "../components/ui.jsx";
 
 export default function Prepare() {
   const { scenario } = useApp();
-  const { data: s, error } = useFetch(scenario ? `/api/me/status${qs({ scenario })}` : null, [scenario]);
+  const { data: d, error } = useFetch(`/api/me/prepare${qs({ scenario })}`, [scenario]);
   if (error) return <div className="page"><ErrorBox error={error} /></div>;
-  if (!s) return <div className="page"><Loading /></div>;
-  const p = s.preparation;
+  if (!d) return <div className="page"><Loading what="Tailoring your preparation plan" /></div>;
+  const { plan } = d;
+  const calm = d.band === "Low";
   return (
     <div className="page stack">
-      <div className="emergency" role="alert">
-        <span aria-hidden="true">⚠</span><span>{p.emergency[0]}</span>
+      <section className="card stack">
+        <div className="row spread">
+          <div className="row"><Band band={d.band} big /><h2 style={{ margin: 0 }}>{plan.headline}</h2></div>
+          <Kind kind="action" />
+        </div>
+        <div className="secondary">{plan.intro}</div>
+      </section>
+      <div className={calm ? "grid" : "grid cols-3"} style={calm ? { maxWidth: 640 } : undefined}>
+        {plan.sections.map((sec) => (
+          <section key={sec.title} className="card stack">
+            <h3>{sec.title}</h3>
+            <ul style={{ margin: 0, paddingLeft: 18 }} className="stack">{sec.items.map((t) => <li key={t}>{t}</li>)}</ul>
+          </section>
+        ))}
       </div>
-      <div className="row"><span>Tailored for</span><Band band={s.risk.band} />
-        <span className="muted small">{s.scenario.name}{s.restoration ? `, possible outage of ${s.restoration.label}` : ""}</span>
+      <div className="emergency" role="alert" style={calm ? { fontWeight: 500 } : undefined}>
+        <span aria-hidden="true">⚠</span><span>{d.emergency[0]}</span>
       </div>
-      <div className="grid cols-3">
-        <Section title="Do now" items={p.now} />
-        <Section title="If your power goes out" items={p.if_out} />
-        {p.your_needs.length > 0 && <Section title="For the needs you told us about" items={p.your_needs} />}
+      <div className="small muted">
+        {plan.source === "claude" ? "Tailored by Claude to your risk band from AEP's approved safety tips. " : ""}
+        Based on {d.scenario === "Live forecast (next 7 days)" ? "the live 7-day forecast" : `the ${d.scenario} simulation`},
+        your risk band and the needs you chose to share. We never guess medical or personal details.
       </div>
-      <div className="small muted">Advice is based on your risk band, the expected outage length and the needs you chose to
-        share in My Data. We never guess medical or personal details.</div>
     </div>
-  );
-}
-
-function Section({ title, items }) {
-  return (
-    <section className="card stack">
-      <div className="row spread"><h3>{title}</h3><Kind kind="action" /></div>
-      <ul style={{ margin: 0, paddingLeft: 18 }} className="stack">{items.map((t) => <li key={t}>{t}</li>)}</ul>
-    </section>
   );
 }

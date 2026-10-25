@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
-import { fmt, hourLabel, qs } from "../api.js";
+import { BAND_COLOR, fmt, hourLabel, qs } from "../api.js";
 import { useApp } from "../App.jsx";
-import { Band, Confidence, ErrorBox, Kind, Loading, useFetch } from "../components/ui.jsx";
+import { Band, Confidence, ErrorBox, Kind, Loading, Ring, useFetch } from "../components/ui.jsx";
 
 export default function MyStatus() {
   const { scenario } = useApp();
@@ -10,6 +10,8 @@ export default function MyStatus() {
   if (loading || !s) return <div className="page"><Loading what="Checking your line" /></div>;
 
   const est = s.restoration;
+  const sim = s.scenario.kind !== "live";
+  const ev = s.event;
   const low = s.confidence.level === "Low";
   const msgs = s.communications.messages;
   const stages = [
@@ -23,17 +25,23 @@ export default function MyStatus() {
     <div className="page">
       <div className="grid cols-2">
         <section className="card stack" aria-labelledby="risk-h">
-          <div className="row spread"><h2 id="risk-h">Will I lose power?</h2><Kind kind="estimate" /></div>
-          <div className="row">
-            <Band band={s.risk.band} big />
-            <div>
-              {s.risk.observed && (
-                <div className="stat"><div className="v">{fmt.pct(s.risk.observed.share)}</div>
-                  <div className="l">of homes in this band lost power in {s.risk.observed.storms} past
-                    storm{s.risk.observed.storms === 1 ? "" : "s"}</div></div>
-              )}
+          <div className="row spread">
+            <h2 id="risk-h">{sim ? `Your power during the simulated ${s.scenario.name.toLowerCase()}` : "Your power outlook - next 7 days"}</h2>
+            <Kind kind="estimate" />
+          </div>
+          <div className="row" style={{ gap: 20, flexWrap: "nowrap", alignItems: "center" }}>
+            <Ring value={ev.area_share} color={BAND_COLOR[s.risk.band]} caption={`of ${ev.area}`} />
+            <div className="stack" style={{ gap: 6 }}>
+              <div className="row"><span className="small secondary">Your risk band</span><Band band={s.risk.band} big /></div>
+              <div><b>{fmt.pct(ev.area_share)}</b> of homes in {ev.area} {sim ? "lose" : "could lose"} power
+                {sim ? " in this storm." : " in the next 7 days."}</div>
+              <div className="small secondary">Your home lost power in <b>{Math.round(ev.home_share * ev.runs)}</b> of{" "}
+                {ev.runs} simulated runs ({fmt.pct(ev.home_share)}).</div>
             </div>
           </div>
+          {sim && (ev.timeline ? <PowerTimeline t={ev.timeline} start={s.start} /> : (
+            <div className="card" style={{ boxShadow: "none" }}>Your home kept power in every simulated run of this storm.</div>
+          ))}
           <div className="secondary">{s.communications.explanation}</div>
           <div>
             <div className="small" style={{ fontWeight: 600 }}>Main reasons</div>
@@ -102,11 +110,36 @@ export default function MyStatus() {
         </section>
         <section className="card stack">
           <h3>Your service</h3>
-          <div className="small">{s.premise.service} service - {s.premise.city}, {s.premise.zip}</div>
+          <div><b>{s.address || `${s.premise.city}, VA ${s.premise.zip}`}</b></div>
           {s.premise.life_support && <div className="small">AEP has a life-support record for this address.</div>}
           <div className="small muted">We show your own address only. Outages elsewhere are shown by area.</div>
         </section>
       </div>
+    </div>
+  );
+}
+
+
+/** A typical simulated run for this home: storm hits -> power lost -> outage confirmed -> restored. */
+function PowerTimeline({ t, start }) {
+  const steps = [
+    ["Storm damage begins nearby", t.storm_hits, "var(--band-elevated)"],
+    ["Your power goes out", t.power_lost, "var(--band-severe)"],
+    ["AEP confirms your outage", t.confirmed, "var(--accent)", "You get an \"Outage confirmed\" alert with an estimate"],
+    t.estimate_updated != null && ["Estimate updated", t.estimate_updated, "var(--accent)", "Crews have assessed the damage"],
+    ["Power restored", t.restored, "var(--band-low)", `Out for about ${fmt.hours(t.hours_out)}`],
+  ].filter(Boolean);
+  return (
+    <div className="stack" style={{ gap: 0 }}>
+      <div className="small muted" style={{ marginBottom: 6 }}>A typical simulated run for your home</div>
+      <ol className="power-timeline">
+        {steps.map(([label, h, color, note], i) => (
+          <li key={label} style={{ animationDelay: `${0.1 + i * 0.12}s` }}>
+            <span className="dot" style={{ background: color }} aria-hidden="true" />
+            <div><b>{label}</b><div className="small secondary">{hourLabel(start, h)}{note ? ` - ${note}` : ""}</div></div>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }

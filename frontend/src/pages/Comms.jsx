@@ -4,7 +4,7 @@ import { useApp } from "../App.jsx";
 import { Loading, useFetch } from "../components/ui.jsx";
 
 export default function Comms() {
-  const { scenario, scenarios, setActive } = useApp();
+  const { scenarios, scenario } = useApp();  // follows the top-right toggle
   const [settings, setSettings] = useState(null);
   const [tick, setTick] = useState(0);
   const [result, setResult] = useState(null);
@@ -16,7 +16,6 @@ export default function Comms() {
   async function save(body) {
     const s = await api("/api/aep/settings", { method: "PUT", body });
     setSettings(s);
-    if (body.active_scenario) setActive(body.active_scenario);
   }
   async function send() {
     setBusy(true);
@@ -45,13 +44,13 @@ export default function Comms() {
           <div className="small muted">AEP operators receive every alert regardless of band.</div>
         </section>
         <section className="card stack">
-          <h2>Active event</h2>
-          <label className="field"><span>Event customers see by default</span>
-            <select value={settings.active_scenario} onChange={(e) => save({ active_scenario: e.target.value })}>
-              {scenarios.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select></label>
+          <h2>Send alerts</h2>
+          <div className="small">Based on: <b>{scenario === "live" ? "Live forecast"
+            : `Storm drill - ${scenarios.find((s) => s.id === scenario)?.name}`}</b> (change it in the top-right menu)</div>
           <button className="primary" onClick={send} disabled={busy}>
-            {busy ? "Evaluating customers..." : "Send alerts for the viewed event"}</button>
+            {busy ? "Evaluating customers..." : "Evaluate customers and send alerts"}</button>
+          <div className="small muted">Customers always see the live forecast. Storm drills send practice alerts so you
+            can check wording, channels and escalations.</div>
           {result && <div className="small" role="status">Queued {result.messages} messages for {result.customers} customers;
             {" "}{result.escalations.length} escalation(s).</div>}
         </section>

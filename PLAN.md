@@ -71,6 +71,15 @@ All in `scripts/`, outputs to `data/processed/` (git-ignored).
 
 ## 4. Risk model (P0)
 
+> **Current approach (team decision, Oct 24):** the model is trained only on the two well-recorded storms -
+> Feb 2025 (freezing rain, then wind; Feb 1 - Mar 3 window) and Hurricane Helene (rain + wind; Sep 8 - Oct 20
+> window) - using Open-Meteo archive weather. All January damage records are excluded. Per-hazard behaviour
+> learned from the damage reports (equipment mix, access-problem and special-equipment rates) is applied to the
+> simulation's storm types. Trade-off found: hold-out tests degrade (Helene predicted from Feb alone: 6,044 vs 194
+> reports) and band outcomes flatten to ~10% for every band, because one storm per hazard can't separate ice from
+> heavy rain. The earlier all-days model (sections below) validated better. In-sample, the two-storm model fits
+> both storms (Feb 1,591 vs 1,254; Helene 153 vs 194).
+
 **Goal:** P(premise / cell loses power during event) → band.
 
 | Band | Probability |
@@ -168,6 +177,11 @@ Hazards still outside the training data get **physics-based rules on top, flagge
 ---
 
 ## 6. What-if scenarios ("What if it hit Virginia?")
+
+> **Current scenario list (team decision, Oct 24):** generic storm types only - Derecho, Tornado outbreak, Snow
+> storm, Arctic cold event - plus the live forecast. Heat wave is left out for now. Weather patterns come from real
+> events (derecho and snow/arctic patterns are local; tornado tracks are shifted from an outbreak elsewhere), but the
+> app names only the storm type. Snow uses an assumption: 0.08 in of ice-equivalent load per inch of wet snow.
 
 | Scenario | Source | Type |
 |---|---|---|

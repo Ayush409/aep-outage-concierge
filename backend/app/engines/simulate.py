@@ -20,17 +20,20 @@ from .weather import cell_to_point
 WIND_STOP = 30.0  # mph gust: no bucket work (team-confirmed limit 28-30 mph)
 WIND_CAUTION = 28.0  # mph gust: reduced productivity
 SHIFT = (6, 22)  # crews work 16 h shifts
-ASSESS_DELAY = 2.0  # hours from damage to a job being assessed and released
+ASSESS_DELAY = 2.0  # hours from damage to a job being assessed and released (storm mode)
+NORMAL_OPS_ASSESS = 1.0  # isolated faults: trouble crew dispatched within the hour
+STORM_MODE_JOBS = 25  # expected damage jobs above which AEP switches to storm shifts
 HORIZON_DAYS = 21
-ACCESS_RATE = 0.32  # share of real ARCOS jobs with access issues
+# fallbacks if the model has no learned hazard behaviour (share of jobs with access issues / special equipment)
+ACCESS_RATE = 0.32
 SPECIAL_EQ_RATE = 0.17
 
 
 @dataclass(frozen=True)
 class Params:
     scenario: str = "feb_2025"
-    crews: int = 45
-    mutual_aid_crews: int = 45
+    crews: int = 20  # 45 + 45 matched the real Feb 2025 repair times (1,254 jobs); smaller storms need fewer
+    mutual_aid_crews: int = 20
     mutual_aid_day: float = 1.0
     gust_mult: float = 1.0
     access_mult: float = 1.0
@@ -81,14 +84,27 @@ def _facility_cells() -> set:
     return cells
 
 
-def _hazard_mix(sc: dict, peak: pd.DataFrame) -> dict:
-    mixes = risk.model().meta["mixes"]
+# which training hazard's damage behaviour each storm type borrows
+LEARNED_FROM = {"ice": "ice", "snow": "ice", "wind": "wind", "tornado": "wind", "tropical": "tropical"}
+
+
+def _learned_hazard(sc: dict, peak: pd.DataFrame) -> str:
     hz = sc["hazard"]
     if hz == "auto":
-        hz = "ice" if peak.frz.max() > 0.1 else "wind"
-    if hz in ("heat", "tornado"):
-        hz = "wind"
-    return mixes.get(hz, mixes["all"])
+        hz = "ice" if peak.frz.max() > 0.1 else ("tropical" if peak.rain72.max() > 2 else "wind")
+    return LEARNED_FROM.get(hz, "wind")
+
+
+def _hazard_mix(sc: dict, peak: pd.DataFrame) -> dict:
+    mixes = risk.model().meta["mixes"]
+    return mixes.get(_learned_hazard(sc, peak), mixes["all"])
+
+
+def _hazard_behaviour(sc: dict, peak: pd.DataFrame) -> dict:
+    """Access-problem and special-equipment rates learned from that hazard's real damage reports."""
+    b = risk.model().meta.get("hazard_behaviour", {}).get(_learned_hazard(sc, peak), {})
+    return dict(access_rate=b.get("access_rate", ACCESS_RATE),
+                special_equipment_rate=b.get("special_equipment_rate", SPECIAL_EQ_RATE))
 
 
 # ------------------------------------------------------------------ hazard rules (lower confidence)
@@ -146,10 +162,12 @@ def _rule_rates(sc: dict, hourly, n_assets: int):
 
 
 # ------------------------------------------------------------------ scheduling
-def _calendar(hourly, horizon: int) -> tuple[np.ndarray, np.ndarray]:
+def _calendar(hourly, horizon: int, storm_mode: bool = True) -> tuple[np.ndarray, np.ndarray]:
+    """Crew working capacity per hour. Storm mode: 16 h shifts. Normal ops: 24/7 trouble crews.
+    Bucket work stops in high wind either way."""
     gmax = np.median(hourly.f["wind_gusts_10m"], axis=0)  # typical gust across the area, not the worst ridgetop
     hours = pd.date_range(hourly.time.iloc[0], periods=horizon, freq="h")
-    cap = np.where((hours.hour >= SHIFT[0]) & (hours.hour < SHIFT[1]), 1.0, 0.0)
+    cap = np.where((hours.hour >= SHIFT[0]) & (hours.hour < SHIFT[1]), 1.0, 0.0) if storm_mode         else np.ones(horizon)
     g = np.zeros(horizon)
     g[: len(gmax)] = gmax[:horizon]
     cap = np.where(g >= WIND_STOP, 0.0, np.where(g >= WIND_CAUTION, 0.5 * cap, cap))
@@ -207,7 +225,8 @@ def run(p: Params) -> dict:
     hourly = weather_for(p.scenario, p.gust_mult)
     T = hourly.hours
     H = T + 24 * HORIZON_DAYS
-    lam, peak, contrib = risk.expected_damage(hourly)
+    lam, peak, contrib = risk.expected_damage(hourly, snow_ice_equiv=sc.get("snow_ice_equiv", 0.0))
+    behave = _hazard_behaviour(sc, peak)
     mix = _hazard_mix(sc, peak)
     rule_rate, rule_when = _rule_rates(sc, hourly, len(g.assets))
     dev_storm = risk.device_rates(lam, mix)
@@ -229,7 +248,9 @@ def run(p: Params) -> dict:
     atype_all = g.assets.asset_type.to_numpy()
     lab = labor()
     fac_cells = _facility_cells()
-    cap, cum = _calendar(hourly, H)
+    storm_mode = lam.sum() + (1 - np.exp(-rule_rate)).sum() >= STORM_MODE_JOBS
+    assess = ASSESS_DELAY if storm_mode else NORMAL_OPS_ASSESS
+    cap, cum = _calendar(hourly, H, storm_mode)
     t0 = pd.Timestamp(hourly.time.iloc[0])
 
     # ---- damage source
@@ -286,8 +307,8 @@ def run(p: Params) -> dict:
             when = np.concatenate([when, np.maximum(rule_when[hit], 0) + rng.random(len(hit)) * 2])
         idx, first = np.unique(idx, return_index=True)
         when = when[first]
-        acc = rng.random(len(idx)) < ACCESS_RATE * p.access_mult
-        spec = rng.random(len(idx)) < SPECIAL_EQ_RATE
+        acc = rng.random(len(idx)) < min(behave["access_rate"] * p.access_mult, 1.0)
+        spec = rng.random(len(idx)) < behave["special_equipment_rate"]
         return idx, when, acc, spec
 
     runs = []
@@ -301,7 +322,7 @@ def run(p: Params) -> dict:
         person_h = direct * lab.ilm
         noise = rng.lognormal(-0.06, 0.35, len(idx))
         dur = person_h / costs.CREW_SIZE * noise
-        release = when + ASSESS_DELAY
+        release = when + assess
         cust = g.dev_customers[np.maximum(iso, 0)]
         boost = 200 * g.dev_life_support[np.maximum(iso, 0)] + np.array(
             [2000 if g.asset_cell[i] in fac_cells else 0 for i in idx])
@@ -314,7 +335,14 @@ def run(p: Params) -> dict:
         np.minimum.at(dev_start, iso, when)
         runs.append(dict(idx=idx, when=when, acc=acc, spec=spec, iso=iso, person_h=person_h, dur=dur,
                          start=start, finish=finish, crew=crew_of, dev_time=dev_time, dev_start=dev_start))
-    return _summarize(p, sc, hourly, lam, peak, contrib, dev_rate, p_out, runs, H, rule_rate)
+    for r in runs:
+        if r is not None:
+            r["assess"] = assess
+    res = _summarize(p, sc, hourly, lam, peak, contrib, dev_rate, p_out, runs, H, rule_rate)
+    res["operations"] = dict(storm_mode=bool(storm_mode), assess_hours=assess,
+                             label="Storm mode: 16-hour crew shifts" if storm_mode else
+                             "Normal operations: 24/7 trouble crews for isolated outages")
+    return res
 
 
 def _premise_times(run_):
@@ -344,11 +372,15 @@ def _summarize(p, sc, hourly, lam, peak, contrib, dev_rate, p_out, runs, H, rule
         cum_restored = np.cumsum(np.bincount(np.clip(np.ceil(rest[out]).astype(int), 0, H), weights=cust[out],
                                              minlength=H + 1))
         t90 = float(np.searchsorted(cum_restored, 0.9 * total_out)) if total_out else 0.0
+        onset = float(st[out].min()) if total_out else 0.0
+        wait = r["start"] - (r["when"] + r.get("assess", ASSESS_DELAY))  # time a released job waits for a crew
         per_run.append(dict(customers_out=total_out, peak_out=float(curve.max()), customer_hours=float(curve.sum()),
                             t_all=float(rest.max()), t90=t90, jobs=len(r["idx"]),
-                            person_hours=float(r["person_h"].sum()), median_hours=float(np.median(hrs)) if len(hrs) else 0))
+                            person_hours=float(r["person_h"].sum()), median_hours=float(np.median(hrs)) if len(hrs) else 0,
+                            t90_after_onset=max(t90 - onset, 0.0), crew_wait=float(np.median(np.maximum(wait, 0)))))
     stats = pd.DataFrame(per_run) if per_run else pd.DataFrame(
-        [dict(customers_out=0, peak_out=0, customer_hours=0, t_all=0, t90=0, jobs=0, person_hours=0, median_hours=0)])
+        [dict(customers_out=0, peak_out=0, customer_hours=0, t_all=0, t90=0, jobs=0, person_hours=0, median_hours=0,
+              t90_after_onset=0, crew_wait=0)])
     med_i = int(np.argsort(stats.customer_hours.to_numpy())[len(stats) // 2]) if valid else -1
     med = valid[med_i] if valid else None
 
@@ -390,6 +422,8 @@ def _summarize(p, sc, hourly, lam, peak, contrib, dev_rate, p_out, runs, H, rule
         level = "Low" if rule_rate.sum() > lam.sum() else "Medium"
         notes.append("Part of the damage comes from physics-based rules (" + ", ".join(sc["rules"]) +
                      ") because no local records exist for this hazard.")
+    if sc.get("snow_ice_equiv"):
+        level = "Medium" if level == "High" else level
     if sc.get("gust_peak_obs"):
         level = "Medium" if level == "High" else level
     if sc["kind"] == "replay":
@@ -404,7 +438,9 @@ def _summarize(p, sc, hourly, lam, peak, contrib, dev_rate, p_out, runs, H, rule
                 summary=dict(customers_out=q("customers_out"), peak_out=q("peak_out"),
                              customer_hours=q("customer_hours"), hours_to_90pct=q("t90"), hours_to_all=q("t_all"),
                              jobs=q("jobs"), person_hours=q("person_hours"),
-                             expected_damage=round(float(lam.sum() + rule_rate.sum()), 1),
+                             hours_onset_to_90pct=q("t90_after_onset"), crew_wait_hours=q("crew_wait"),
+                             typical_outage_hours=q("median_hours"),
+                             expected_damage=round(float(lam.sum() + (1 - np.exp(-rule_rate)).sum()), 1),
                              expected_customers_out=int((p_out * cust).sum()),
                              total_customers=int(cust.sum())),
                 confidence=dict(level=level, notes=notes))
