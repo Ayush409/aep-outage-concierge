@@ -432,3 +432,10 @@ tr.click:hover td { background: var(--brand-soft); }
 .chat-p:last-child { margin-bottom: 0; }
 .chat-list { margin: 2px 0 6px; padding-left: 18px; }
 .chat-list li { margin: 2px 0; }
+
+/* Simulation: change since the previous run */
+.stat .delta { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat .delta.good { color: var(--band-low); }
+.stat .delta.bad { color: var(--band-severe); }
+.stat .delta.same { color: var(--text-muted); font-weight: 400; }
+.run-btn.dirty { box-shadow: 0 0 0 3px color-mix(in srgb, var(--band-severe) 35%, transparent); }

@@ -791,7 +791,8 @@ def aep_model(user=Depends(require_aep)):
                     "damage reproduces the customers who lost power.",
                     "Repair hours come from AEP's labor workbook x ILM 4.5; crews of 4; 16-hour shifts; bucket work "
                     "stops at 30 mph gusts and slows from 28 mph.",
-                    "Crew defaults (45 local + 45 mutual aid from day 1) reproduce the real Feb 2025 repair times.",
+                    "Crew defaults (20 local + 40 mutual aid from day 1) best match the real Feb 2025 repair dates "
+                    "(the only storm with usable repair dates).",
                 ])
 
 

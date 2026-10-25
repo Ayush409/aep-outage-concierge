@@ -92,7 +92,7 @@ def tornado_tracks() -> list[dict]:
 
 def default_crews(sid: str) -> dict:
     """Local + mutual-aid crews a scenario starts with (big events come with a bigger mutual-aid call)."""
-    return dict(crews=20, mutual_aid_crews=20) | SCENARIOS[sid].get("default_crews", {})
+    return dict(crews=20, mutual_aid_crews=40) | SCENARIOS[sid].get("default_crews", {})  # Feb 2025 calibration
 
 
 def catalogue() -> list[dict]:
