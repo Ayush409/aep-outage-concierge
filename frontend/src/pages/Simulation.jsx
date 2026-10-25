@@ -7,22 +7,25 @@ import { BOUNDS, sample } from "../components/weather.js";
 import { ErrorBox, Loading, Stat, useFetch } from "../components/ui.jsx";
 import { CostBars, OutageCurve } from "../components/charts.jsx";
 
-const DEFAULTS = { crews: 20, mutual_aid_crews: 20, mutual_aid_day: 1, gust_mult: 1, access_mult: 1 };
+const DEFAULTS = { crews: 20, mutual_aid_crews: 40, mutual_aid_day: 1, gust_mult: 1, access_mult: 1 };
 const PLAY_MS = 8000;
 const N_PARTICLES = 1400;
 
 export default function Simulation() {
-  const { scenarios, scenario, setScenario, user } = useApp();  // selection comes from the top-right toggle
+  const { scenarios, scenario, user } = useApp();  // selection comes from the top-right toggle
   const aep = user.role === "aep";
-  const [draft, setDraft] = useState(DEFAULTS);
-  const [params, setParams] = useState(DEFAULTS);
-  // re-run automatically shortly after a slider stops moving
-  useEffect(() => {
-    const t = setTimeout(() => setParams(draft), 600);
-    return () => clearTimeout(t);
-  }, [draft]);
+  const [draft, setDraft] = useState(DEFAULTS);   // what the sliders show
+  const [params, setParams] = useState(DEFAULTS); // what the results were run with
+  const [prev, setPrev] = useState(null);         // summary of the run before the current one
+  const dirty = Object.keys(DEFAULTS).some((k) => draft[k] !== params[k]);
   const q = scenario ? qs({ scenario, ...params }) : null;
   const ov = useFetch(q && `/api/sim/overview${q}`, [q]);
+  // a different storm is not comparable with the last run
+  useEffect(() => { setPrev(null); }, [scenario]);
+  function runSim() {
+    setPrev(ov.data?.summary || null);
+    setParams(draft);
+  }
   const frames = useFetch(q && `/api/sim/frames${q}`, [q]).data;
   const weather = useFetch(scenario ? `/api/weather${qs({ scenario })}` : null, [scenario]).data;
   const [hour, setHour] = useState(0);
@@ -110,25 +113,36 @@ export default function Simulation() {
         {sc && <div className="small secondary">{sc.summary}</div>}
         {scenario === "live" && (
           <div className="small">Plays out what the coming week's forecast could do. Pick a storm in the top-right menu
-            (or <button className="chip" onClick={() => setScenario("derecho")}>try a derecho</button>) to simulate it.</div>
+            to simulate it.</div>
         )}
         <hr />
-        <div className="small" style={{ fontWeight: 600 }}>Change the inputs</div>
+        <div className="small" style={{ fontWeight: 600 }}>The storm</div>
+        <Slider label="Wind strength" v={draft.gust_mult} min={0.6} max={1.5} step={0.05} fmtv={(v) => `${Math.round(v * 100)}%`}
+          on={(v) => setDraft({ ...draft, gust_mult: v })} />
+        <div className="small muted">Changes how much breaks and how many customers lose power.</div>
+        <div className="small" style={{ fontWeight: 600 }}>The response</div>
         <Slider label="Local crews" v={draft.crews} min={5} max={200} step={5} on={(v) => setDraft({ ...draft, crews: v })} />
         <Slider label="Mutual-aid crews" v={draft.mutual_aid_crews} min={0} max={200} step={5}
           on={(v) => setDraft({ ...draft, mutual_aid_crews: v })} />
-        <Slider label="Mutual aid arrives (day)" v={draft.mutual_aid_day} min={0} max={5} step={0.5}
-          on={(v) => setDraft({ ...draft, mutual_aid_day: v })} />
-        <Slider label="Wind strength" v={draft.gust_mult} min={0.6} max={1.5} step={0.05} fmtv={(v) => `${Math.round(v * 100)}%`}
-          on={(v) => setDraft({ ...draft, gust_mult: v })} />
-        <Slider label="Access problems" v={draft.access_mult} min={0} max={3} step={0.25} fmtv={(v) => `${v}x`}
-          on={(v) => setDraft({ ...draft, access_mult: v })} />
+        <div className="small muted">Changes how long outages last - not who loses power.</div>
+        <details>
+          <summary className="small">More options</summary>
+          <div className="stack" style={{ marginTop: 8 }}>
+            <Slider label="Mutual aid arrives (day)" v={draft.mutual_aid_day} min={0} max={5} step={0.5}
+              on={(v) => setDraft({ ...draft, mutual_aid_day: v })} />
+            <Slider label="Access problems" v={draft.access_mult} min={0} max={3} step={0.25} fmtv={(v) => `${v}x`}
+              on={(v) => setDraft({ ...draft, access_mult: v })} />
+          </div>
+        </details>
         <div className="row">
+          <button className={`primary run-btn${dirty ? " dirty" : ""}`} onClick={runSim} disabled={!dirty || ov.loading}>
+            {ov.loading ? "Running..." : "Run simulation"}</button>
           <button onClick={() => setDraft(DEFAULTS)}>Reset</button>
-          <span className="small muted" role="status">{ov.loading ? "Re-running..." : "Results update as you move a slider"}</span>
         </div>
-        <div className="small muted">Bucket trucks stop at 30 mph gusts. Each run repeats 40 times with random job times
-          to give ranges. More crews only help while jobs are waiting for a crew - watch "Waiting for a crew".</div>
+        <div className="small muted" role="status">
+          {ov.loading ? "Running 40 versions of the storm..." : dirty ? "Inputs changed - press Run simulation."
+            : prev ? "Results updated. Changes are shown against the previous run." : "Move a slider, then press Run simulation."}
+        </div>
       </aside>
 
       <div className="stack" style={{ minWidth: 0 }}>
@@ -154,15 +168,27 @@ export default function Simulation() {
         <ErrorBox error={ov.error} />
         {!s ? <Loading what="Running the simulation" /> : (
           <>
-            <div className="grid cols-4">
+            <div className="small secondary" role="status">
+              {ov.loading ? "Running the simulation with your new inputs..." : <>Results for: <b>wind {Math.round(params.gust_mult * 100)}%</b>
+                {" · "}<b>{params.crews} local crews</b>{" · "}<b>{params.mutual_aid_crews} mutual-aid crews</b>
+                {" (arriving day "}{params.mutual_aid_day}{") · access problems "}{params.access_mult}x</>}
+            </div>
+            <div className="grid cols-4" style={{ opacity: ov.loading ? 0.45 : 1, transition: "opacity .2s" }}>
               <Stat label="Customers who lose power" value={fmt.n(s.customers_out.p50)}
-                sub={`range ${fmt.n(s.customers_out.p10)}-${fmt.n(s.customers_out.p90)} of ${fmt.n(s.total_customers)}`} />
-              <Stat label="Most out at once" value={fmt.n(s.peak_out.p50)} />
+                delta={change(s, prev, "customers_out", fmt.n)}
+                sub={`range ${fmt.n(s.customers_out.p10)}-${fmt.n(s.customers_out.p90)} of ${fmt.n(s.total_customers)} - set by the storm`} />
+              <Stat label="Most out at once" value={fmt.n(s.peak_out.p50)} delta={change(s, prev, "peak_out", fmt.n)} />
               <Stat label="Typical outage length" value={fmt.hours(s.typical_outage_hours.p50)}
+                delta={change(s, prev, "typical_outage_hours", fmt.hours)}
                 sub={`median customer; 90% restored within ${fmt.hours(s.hours_onset_to_90pct.p50)} of the first outage`} />
               <Stat label="Waiting for a crew" value={fmt.hours(s.crew_wait_hours.p50)}
+                delta={change(s, prev, "crew_wait_hours", fmt.hours)}
                 sub={`median per job - ${fmt.n(s.jobs.p50)} jobs, ${fmt.n(s.person_hours.p50)} person-hours`} />
             </div>
+            {s.crew_wait_hours.p50 === 0 && (
+              <div className="small muted">No repair job waits for a crew at these settings, so adding crews won't shorten
+                outages. Try fewer crews or a stronger storm to see crews make a difference.</div>
+            )}
             <details className="small confidence-line">
               <summary>Confidence: <b>{ov.data.confidence.level}</b>
                 {ov.data.operations && <span className="muted"> - {ov.data.operations.label}</span>}
@@ -188,6 +214,14 @@ export default function Simulation() {
       </div>
     </div>
   );
+}
+
+/** Change in a summary stat's median since the previous run (lower is better for all of these). */
+function change(s, prev, key, f) {
+  if (!prev?.[key]) return null;
+  const d = s[key].p50 - prev[key].p50;
+  if (Math.abs(d) < 0.05) return { text: "no change vs last run", tone: "same" };
+  return { text: `${d > 0 ? "+" : "-"}${f(Math.abs(d))} vs last run`, tone: d > 0 ? "bad" : "good" };
 }
 
 function Slider({ label, v, min, max, step, on, fmtv = (x) => x }) {

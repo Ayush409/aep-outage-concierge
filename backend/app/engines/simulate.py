@@ -33,7 +33,7 @@ SPECIAL_EQ_RATE = 0.17
 class Params:
     scenario: str = "feb_2025"
     crews: int = 20  # 45 + 45 matched the real Feb 2025 repair times (1,254 jobs); smaller storms need fewer
-    mutual_aid_crews: int = 20
+    mutual_aid_crews: int = 40  # 20 local + 40 mutual aid best matches the real Feb 2025 repair dates
     mutual_aid_day: float = 1.0
     gust_mult: float = 1.0
     access_mult: float = 1.0

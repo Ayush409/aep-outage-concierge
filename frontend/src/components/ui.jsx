@@ -34,11 +34,13 @@ export function BandLegend() {
   );
 }
 
-export function Stat({ label, value, sub }) {
+/** delta: optional { text, tone: "good" | "bad" | "same" } - change since the previous run */
+export function Stat({ label, value, sub, delta }) {
   return (
     <div className="card stat">
       <div className="l">{label}</div>
       <div className="v">{value}</div>
+      {delta && <div className={`delta ${delta.tone}`}>{delta.text}</div>}
       {sub && <div className="s">{sub}</div>}
     </div>
   );
