@@ -101,10 +101,14 @@ class CustomerExperienceTests(unittest.TestCase):
             self.assertEqual(self.client.post("/api/aep/alerts/send?scenario=live&kind=restored").status_code, 409)
             sms.assert_not_called()
 
-    def test_demo_disabled_does_not_create_session(self):
-        with patch.object(main, "DEV_MODE", False):
-            self.assertFalse(self.client.get("/api/demo/households").json()["enabled"])
-            self.assertEqual(self.client.post("/api/auth/demo", json=dict(household="medical")).status_code, 404)
+    def test_anonymous_household_sees_map_only(self):
+        main.app.dependency_overrides.clear()  # use the real role checks
+        guest = TestClient(main.app)  # fresh browser: no customer session
+        self.assertIn(guest.post("/api/auth/demo", json=dict(household="medical")).status_code, (404, 405))  # removed
+        self.assertEqual(guest.post("/api/auth/guest").status_code, 200)
+        self.assertEqual(guest.get("/api/auth/me").json()["role"], "guest")
+        for path in ("/api/me/status", "/api/me/profile", "/api/aep/settings"):
+            self.assertEqual(guest.get(path).status_code, 403, path)
 
     def test_model_review_is_hidden_when_model_fingerprint_changes(self):
         import hashlib

@@ -6,9 +6,12 @@ Guardrails:
 - The prompt forbids inventing numbers; output is schema-constrained JSON.
 - Any failure (no credentials, refusal, network) falls back to the deterministic templates.
 """
+import hashlib
 import json
+import threading
 import logging
 from functools import lru_cache
+from pathlib import Path
 
 import anthropic
 
@@ -70,8 +73,38 @@ def _fallback_explanation(ctx: dict) -> str:
     return s
 
 
+_DISK = Path(__file__).resolve().parents[1] / "cache" / "ai_cache.json"
+_disk_lock = threading.Lock()
+
+
+def _disk_cached(kind: str, prompt: str, ctx_json: str, make) -> str:
+    """Claude outputs saved to backend/cache (gitignored). Same model + prompt + inputs -> same text, no API call."""
+    key = hashlib.sha256(f"{kind}|{ANTHROPIC_MODEL}|{prompt}|{ctx_json}".encode()).hexdigest()
+    with _disk_lock:
+        try:
+            store = json.loads(_DISK.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            store = {}
+        if key in store:
+            return store[key]
+    text = make()
+    with _disk_lock:
+        try:
+            store = json.loads(_DISK.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            store = {}
+        store[key] = text
+        _DISK.parent.mkdir(parents=True, exist_ok=True)
+        _DISK.write_text(json.dumps(store), encoding="utf-8")
+    return text
+
+
 @lru_cache(maxsize=256)
 def _generate(ctx_json: str) -> str:
+    return _disk_cached("comms", SYSTEM, ctx_json, lambda: _call_comms(ctx_json))
+
+
+def _call_comms(ctx_json: str) -> str:
     resp = _client().beta.messages.create(
         model=ANTHROPIC_MODEL,
         max_tokens=4000,
@@ -138,6 +171,10 @@ PREP_LIMITS = {"Low": (2, 0, 0), "Elevated": (4, 2, 0), "High": (6, 4, 0), "Seve
 
 @lru_cache(maxsize=256)
 def _generate_prep(ctx_json: str) -> str:
+    return _disk_cached("prep", PREP_SYSTEM, ctx_json, lambda: _call_prep(ctx_json))
+
+
+def _call_prep(ctx_json: str) -> str:
     resp = _client().beta.messages.create(
         model=ANTHROPIC_MODEL,
         max_tokens=4000,

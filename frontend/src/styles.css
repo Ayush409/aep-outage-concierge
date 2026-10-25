@@ -575,3 +575,29 @@ details > summary { cursor: pointer; }
 .stat .delta.bad { color: var(--band-severe); }
 .stat .delta.same { color: var(--text-muted); font-weight: 400; }
 .run-btn.dirty { box-shadow: 0 0 0 3px color-mix(in srgb, var(--band-severe) 35%, transparent); }
+
+/* Restoration planner: job status */
+.job-status { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  white-space: nowrap; }
+span.job-status.done { background: color-mix(in srgb, var(--band-low) 18%, transparent); color: var(--band-low); }
+span.job-status.in_progress { background: color-mix(in srgb, var(--series-1) 18%, transparent); color: var(--series-1); }
+span.job-status.needs_repair { background: color-mix(in srgb, var(--band-severe) 16%, transparent); color: var(--band-severe); }
+span.job-status.upcoming { background: var(--surface-2); color: var(--text-secondary); }
+.chip.active { outline: 2px solid var(--brand); }
+
+/* customer: simulated alert pop-ups slide in from the right */
+.alert-popups { position: fixed; top: 76px; right: 16px; z-index: 60; width: min(360px, calc(100vw - 32px));
+  display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 180px); overflow-y: auto; overflow-x: hidden;
+  padding: 2px; }
+.alert-popup { background: var(--surface); color: var(--text-primary); border: 1px solid var(--border);
+  border-left: 5px solid var(--brand); border-radius: 12px; padding: 12px 14px; box-shadow: var(--shadow);
+  animation: popup-in .45s cubic-bezier(.2, .8, .2, 1) both; }
+.alert-popup.pre_storm { border-left-color: var(--band-elevated); }
+.alert-popup.outage_confirmed { border-left-color: var(--band-severe); }
+.alert-popup.estimate_updated { border-left-color: var(--series-1); }
+.alert-popup.restored { border-left-color: var(--band-low); }
+.alert-popup.leaving { animation: popup-out .25s ease-in both; }
+.popup-close { padding: 2px 8px; line-height: 1; }
+.dismiss-all { align-self: flex-end; background: var(--surface); }
+@keyframes popup-in { from { opacity: 0; transform: translateX(110%); } to { opacity: 1; transform: none; } }
+@keyframes popup-out { to { opacity: 0; transform: translateX(110%); } }

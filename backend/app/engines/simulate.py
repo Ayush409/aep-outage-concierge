@@ -14,6 +14,7 @@ from scipy.stats import poisson
 
 from . import costs, risk
 from .data import PROCESSED, grid
+from .weather import iso_local
 from .scenarios import SCENARIOS, tornado_tracks, weather_for
 from .structures import kit_direct_hours, labor
 from .weather import cell_to_point
@@ -229,6 +230,15 @@ def _schedule(release, dur, prio, n_local, n_aid, aid_start, cap, cum):
 
 
 # ------------------------------------------------------------------ main entry
+@lru_cache(maxsize=256)
+def summary(p: Params) -> dict:
+    """Only the small numbers (for crew curves and what-ifs): computed without entering run()'s cache, so a
+    sweep of crew levels never evicts the full results that the maps and pages are using."""
+    res = run.__wrapped__(p)
+    return dict(summary=res["summary"], cost=res["cost"], operations=res.get("operations"),
+                confidence=res["confidence"])
+
+
 @lru_cache(maxsize=12)  # ~20 MB per result; scenario/crew changes add entries
 def run(p: Params) -> dict:
     g = grid()
@@ -456,7 +466,7 @@ def _summarize(p, sc, hourly, lam, peak, contrib, dev_rate, p_out, runs, H, rule
         if r is not med:
             del r["st"], r["rest"]
     return dict(params=p.__dict__, scenario=dict(id=p.scenario, **{k: v for k, v in sc.items() if k != "weather"}),
-                time=[t.isoformat() for t in pd.date_range(hourly.time.iloc[0], periods=H, freq="h")],
+                time=iso_local(pd.date_range(hourly.time.iloc[0], periods=H, freq="h")),
                 weather_hours=hourly.hours, hourly=hourly, lam=lam, peak=peak, contrib=contrib,
                 dev_rate=dev_rate, p_out=p_out, runs=valid, median=med, stats=stats, cost=cost,
                 summary=dict(customers_out=q("customers_out"), peak_out=q("peak_out"),

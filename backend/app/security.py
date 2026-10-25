@@ -53,6 +53,8 @@ def current_user(concierge_session: str | None = Cookie(default=None)) -> dict:
         claims = jwt.decode(concierge_session, JWT_SECRET, algorithms=["HS256"])
     except jwt.PyJWTError:
         raise HTTPException(401, "Session expired")
+    if claims.get("role") == "guest":  # anonymous household: no account, no address, map data only
+        return dict(id=None, email=None, name="Anonymous household", role="guest", is_demo=1)
     with db.tx() as con:
         row = con.execute("SELECT id, email, name, role, is_demo FROM users WHERE id = ?", (int(claims["sub"]),)).fetchone()
     if row is None:

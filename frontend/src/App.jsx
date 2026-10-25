@@ -23,6 +23,7 @@ const CUSTOMER_TABS = [
   ["/status", "My Status"], ["/map", "Map"], ["/alerts", "Alerts"],
   ["/data", "My Data & Privacy"],
 ];
+const GUEST_TABS = [["/map", "Outage Map"]];
 const AEP_TABS = [
   ["/ops", "Ops Map"], ["/restoration", "Restoration Planner"], ["/impact", "Business Impact"],
   ["/comms", "Communications"], ["/simulation", "Simulation"], ["/model", "Model & Audit"],
@@ -123,9 +124,29 @@ function Shell() {
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scenario]);
+
+  // customers: running a simulation slides in that storm's alerts for their home, one after another
+  const [popups, setPopups] = useState([]);
+  useEffect(() => {
+    setPopups([]);
+    if (user.role !== "customer" || scenario === "live") return undefined;
+    let alive = true;
+    const timers = [];
+    api(`/api/me/alerts/timeline?scenario=${encodeURIComponent(scenario)}`).then((r) => {
+      if (!alive) return;
+      r.alerts.forEach((n, i) => timers.push(setTimeout(() => setPopups((p) => [...p, { ...n, id: `${scenario}-${i}` }]),
+        600 + i * 1400)));
+    }).catch(() => {});
+    return () => { alive = false; timers.forEach(clearTimeout); };
+  }, [scenario, user.role]);
+  const dismiss = (id) => {
+    setPopups((p) => p.map((n) => (n.id === id ? { ...n, leaving: true } : n)));
+    setTimeout(() => setPopups((p) => p.filter((n) => n.id !== id)), 260);
+  };
   const nav = useNavigate();
   const aep = user.role === "aep";
-  const tabs = aep ? AEP_TABS : CUSTOMER_TABS;
+  const guest = user.role === "guest"; // anonymous household: outage map only
+  const tabs = aep ? AEP_TABS : guest ? GUEST_TABS : CUSTOMER_TABS;
 
   async function logout() {
     await api("/api/auth/logout", { method: "POST" });
@@ -136,7 +157,7 @@ function Shell() {
   return (
     <div className={`shell${aep ? " operator-shell" : ""}`}>
       <header className="topbar">
-        <div className="logo"><span className="logo-mark" aria-hidden="true">⚡</span>AEP Outage Concierge<small>{aep ? "Operations" : "Customer"}</small></div>
+        <div className="logo"><span className="logo-mark" aria-hidden="true">⚡</span>AEP Outage Concierge<small>{aep ? "Operations" : guest ? "Anonymous" : "Customer"}</small></div>
         <nav className="tabs" aria-label="Sections">
           {tabs.map(([to, label]) => (
             <NavLink key={to} to={to} className={({ isActive }) => (isActive ? "active" : "")}>{label}</NavLink>
@@ -151,7 +172,7 @@ function Shell() {
             ))}
           </select>
           <span>{user.name}</span>
-          <button className="ghost" onClick={logout}>Sign out</button>
+          <button className="ghost" onClick={logout}>{guest ? "Exit" : "Sign out"}</button>
         </div>
       </header>
       {scenario !== "live" && (
@@ -163,7 +184,12 @@ function Shell() {
       )}
       <div className="route-anim" key={location.pathname}>
         <Routes>
-          {aep ? (
+          {guest ? (
+            <>
+              <Route path="/map" element={<CustomerMap />} />
+              <Route path="*" element={<Navigate to="/map" />} />
+            </>
+          ) : aep ? (
             <>
               <Route path="/ops" element={<OpsMap />} />
               <Route path="/restoration" element={<Restoration />} />
@@ -186,7 +212,26 @@ function Shell() {
           )}
         </Routes>
       </div>
-      <ChatWidget key={user.role} aep={aep} />
+      {!guest && <ChatWidget key={user.role} aep={aep} />}
+      {popups.length > 0 && (
+        <div className="alert-popups" aria-live="polite" aria-label="Simulated alerts">
+          {popups.length > 1 && <button className="ghost small dismiss-all" onClick={() => popups.forEach((n) => dismiss(n.id))}>
+            Dismiss all</button>}
+          {popups.map((n) => (
+            <div key={n.id} className={`alert-popup ${n.kind}${n.leaving ? " leaving" : ""}`} role="status">
+              <div className="row spread" style={{ alignItems: "flex-start", gap: 8 }}>
+                <div>
+                  <b>{n.title}</b>
+                  <div className="small muted">{new Date(n.at).toLocaleString(undefined, { weekday: "short", month: "short",
+                    day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" })} (simulated)</div>
+                </div>
+                <button className="ghost popup-close" onClick={() => dismiss(n.id)} aria-label={`Dismiss ${n.title}`}>✕</button>
+              </div>
+              <div className="small">{n.body.replace(/^\[Simulation\] /, "")}</div>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className={`toast${t.sim ? " sim" : ""}`}>{t.text}</div>)}
       </div>

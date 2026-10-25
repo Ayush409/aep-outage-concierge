@@ -25,7 +25,8 @@ export default function MyStatus() {
         <div className="row"><Band band={s.risk.band} big /><span>storm planning indicator</span></div>
         <p className="secondary">This band helps prioritize preparation. It is not a validated probability that your home will lose power.</p>
         <RestorationSummary status={s} />
-        <details><summary>Why this estimate has limited confidence</summary>
+        <details><summary>Confidence for this {s.scenario.kind === "live" ? "forecast" : "simulation"}:{" "}
+          <b>{s.confidence.level}</b> - why?</summary>
           <ul>{s.confidence.notes.map((n) => <li key={n}>{n}</li>)}</ul>
           <h3>Main factors for your home</h3><ul>{s.factors_plain.map((f) => <li key={f}>{f}</li>)}</ul>
           <p className="small">Your home loses power in {Math.round(s.event.home_share * s.event.runs)} of {s.event.runs} model runs. This describes the simulation, not measured real-world odds.</p>

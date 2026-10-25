@@ -105,12 +105,13 @@ export function CrewCurve({ rows, current, height = 260 }) {
           <YAxis {...axis} tickFormatter={fmt.usd} width={60} />
           <Tooltip {...tipStyle} labelFormatter={(c) => `${c} crews`} formatter={(v, k) => [fmt.usd(v), k]} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
-          <Line dataKey="repair" name="Crew + equipment (AEP)" stroke="var(--series-2)" strokeWidth={2} dot={{ r: 4 }}
+          {/* total first and dashed, so the parts drawn on top stay visible when one of them is most of the total */}
+          <Line dataKey="total" name="Total" stroke="var(--series-1)" strokeWidth={2.5} strokeDasharray="6 4"
+            dot={{ r: 3 }} isAnimationActive={false} />
+          <Line dataKey="repair" name="Crew + equipment (AEP)" stroke="var(--series-2)" strokeWidth={2.5} dot={{ r: 4 }}
             isAnimationActive={false} />
           <Line dataKey="customer_side" name="Customer cost + lost revenue" stroke="var(--series-3)" strokeWidth={2}
             dot={{ r: 4 }} isAnimationActive={false} />
-          <Line dataKey="total" name="Total" stroke="var(--series-1)" strokeWidth={2.5} dot={{ r: 4 }}
-            isAnimationActive={false} />
           <ReferenceDot x={best.crews} y={best.total} r={7} fill="none" stroke="var(--text-primary)" strokeWidth={2} />
           {current && <ReferenceDot x={current} y={data.find((d) => d.crews === current)?.total ?? 0} r={0} />}
         </LineChart>

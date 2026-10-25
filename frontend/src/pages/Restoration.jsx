@@ -17,11 +17,21 @@ export default function Restoration() {
   const ov = overviewFetch.data;
   const [sel, setSel] = useState(null);
   const [filter, setFilter] = useState("all");
-  const shown = (jobs || []).filter((j) => filter === "all" || j.type === filter);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [asOf, setAsOf] = useState(null); // hours since ov.start; null = default (now for live, peak for a storm)
+  const live = scenario === "live";
+  const lastHour = Math.ceil(Math.max(0, ...(jobs || []).map((j) => j.finish))) + 1;
+  const nowHour = ov ? (Date.now() - new Date(ov.start).getTime()) / 3.6e6 : 0;
+  const peakHour = ov?.curve?.p50?.length ? ov.curve.hours[ov.curve.p50.indexOf(Math.max(...ov.curve.p50))] : 0;
+  const t = asOf ?? (live ? nowHour : peakHour);
+  const withStatus = (jobs || []).map((j) => ({ ...j, status: jobStatus(j, t) }));
+  const counts = Object.fromEntries(STATUS.map(([k]) => [k, withStatus.filter((j) => j.status === k).length]));
+  const shown = withStatus.filter((j) => (filter === "all" || j.type === filter)
+    && (statusFilter === "all" || j.status === statusFilter));
   const selected = shown.find(j => j.job === sel) || shown[0];
   const detailFetch = useFetch(selected ? `/api/aep/jobs/${selected.job}${q}` : null, [selected?.job, q]);
   const detail = detailFetch.data;
-  useEffect(() => { setSel(null); setFilter("all"); }, [scenario]);
+  useEffect(() => { setSel(null); setFilter("all"); setStatusFilter("all"); setAsOf(null); }, [scenario]);
 
   if (jobFetch.error || overviewFetch.error) return <div className="page"><ErrorBox error={jobFetch.error || overviewFetch.error} /></div>;
   if (!jobs || !ov || jobFetch.loading || overviewFetch.loading) return <div className="page"><Loading what="Planning restoration" /></div>;
@@ -60,20 +70,39 @@ export default function Restoration() {
         <section className="card stack" style={{ minWidth: 0 }}>
           <div className="row spread">
             <h2>Job order (median run)</h2>
-            <select value={filter} onChange={(e) => setFilter(e.target.value)} style={{ width: "auto" }}>
+            <select value={filter} onChange={(e) => setFilter(e.target.value)} style={{ width: "auto" }}
+              aria-label="Damage type">
               <option value="all">All damage types</option>
               {types.map((t) => <option key={t} value={t}>{TYPE[t] || t}</option>)}
             </select>
+          </div>
+          <div className="stack" style={{ gap: 6 }}>
+            <label className="small">
+              <b>Status as of {new Date(new Date(ov.start).getTime() + t * 3.6e6).toLocaleString(undefined,
+                { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</b>
+              {live && asOf == null && <span className="muted"> (now)</span>}
+              <input type="range" min={0} max={Math.max(lastHour, Math.ceil(t) + 1)} step={1} value={Math.round(t)}
+                onChange={(e) => setAsOf(+e.target.value)} aria-label="Status as of" style={{ width: "100%" }} />
+            </label>
+            <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+              <button className={`chip${statusFilter === "all" ? " active" : ""}`} onClick={() => setStatusFilter("all")}>
+                All ({withStatus.length})</button>
+              {STATUS.map(([k, label]) => (
+                <button key={k} className={`chip job-status ${k}${statusFilter === k ? " active" : ""}`}
+                  onClick={() => setStatusFilter(k)}>{label} ({counts[k]})</button>))}
+              {(asOf != null) && <button className="chip" onClick={() => setAsOf(null)}>{live ? "Back to now" : "Back to peak"}</button>}
+            </div>
           </div>
           <div className="small muted">Crews take the job that restores the most customers per crew-hour first;
             life-support customers and hospital circuits get priority. Work pauses when gusts reach 30 mph.</div>
           <div className="planner-job-table">
             <table>
-              <thead><tr><th>Start</th><th>Damage</th><th className="num">Customers behind</th>
+              <thead><tr><th>Status</th><th>Start</th><th>Damage</th><th className="num">Customers behind</th>
                 <th className="num">Person-h</th><th>Flags</th><th>Done</th></tr></thead>
               <tbody>{shown.map((j) => (
                 <tr key={j.job} className="click" onClick={() => setSel(j.job)}
                   style={selected?.job === j.job ? { outline: "2px solid var(--accent)" } : undefined}>
+                  <td><span className={`job-status ${j.status}`}>{STATUS_LABEL[j.status]}</span></td>
                   <td className="small">{hourLabel(ov.start, j.start)}</td>
                   <td><button className="job-select" aria-pressed={selected?.job === j.job} onClick={() => setSel(j.job)}>{TYPE[j.type] || j.type}</button>{j.drawing ? <span className="muted small"> - drawing {j.drawing}</span> : ""}</td>
                   <td className="num">{fmt.n(j.customers_behind)}{j.life_support_behind ? " ♥" : ""}</td>
@@ -84,7 +113,9 @@ export default function Restoration() {
               ))}</tbody>
             </table>
           </div>
-          <div className="small muted">♥ = life-support premise behind this device. Showing the first {jobs.length} jobs.</div>
+          <div className="small muted">♥ = life-support premise behind this device. Done = repaired; In progress = crew
+            on site; Needs repair = damage has happened, waiting for a crew; Upcoming = damage the model expects later.
+            {" "}{jobs.length >= 3000 ? `Showing the first ${jobs.length} jobs.` : `${jobs.length} jobs in this run.`}</div>
         </section>
         <section className="card stack planner-detail">
           <h2>Repair detail</h2>
@@ -97,6 +128,18 @@ export default function Restoration() {
       </div>
     </div>
   );
+}
+
+const STATUS = [["done", "Done"], ["in_progress", "In progress"], ["needs_repair", "Needs repair"],
+  ["upcoming", "Upcoming"]];
+const STATUS_LABEL = Object.fromEntries(STATUS);
+
+/** Where a job stands at hour t (hours since the window start). */
+function jobStatus(j, t) {
+  if (j.finish <= t) return "done";
+  if (j.start <= t) return "in_progress";
+  if (j.damaged_at <= t) return "needs_repair";
+  return "upcoming";
 }
 
 function JobDetail({ d, start }) {

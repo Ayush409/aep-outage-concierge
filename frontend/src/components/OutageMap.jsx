@@ -16,13 +16,14 @@ const FAC = { hospital: [208, 59, 59], fire: [235, 104, 52], ems: [98, 80, 214] 
  * % by circuit and expected-damage details. Customer only: their own home and risk band.
  */
 export default function OutageMap({ aep = false }) {
-  const { scenario, customerParams, customerRevision } = useApp();
+  const { scenario, customerParams, customerRevision, user } = useApp();
+  const guest = user?.role === "guest"; // anonymous household: no home, no personal status
   const q = qs(aep ? { scenario } : customerParams);
   const weather = useFetch(`/api/weather${qs({ scenario })}`, [scenario]).data;
   const cells = useFetch(`/api/sim/cells${q}`, [scenario]).data;
   const frames = useFetch(`/api/sim/frames${q}`, [scenario]).data;
   const overview = useFetch(`/api/sim/overview${q}`, [scenario]).data;
-  const status = useFetch(aep ? null : `/api/me/status${q}`, [scenario, customerParams.access_mult, customerRevision]).data;
+  const status = useFetch(aep ? null : guest ? null : `/api/me/status${q}`, [scenario, customerParams.access_mult, customerRevision]).data;
   const pins = useFetch(aep ? `/api/aep/pins${q}` : null, [scenario]).data;
   const fac = useFetch(aep ? "/api/aep/facilities" : null).data;
   const [layer, setLayer] = useState(aep ? null : "wind_gusts_10m");
@@ -184,7 +185,8 @@ export default function OutageMap({ aep = false }) {
             ))}
             {show.risk && (aep ? <BandLegend /> : <div className="muted">Risk colors are experimental planning indicators, not measured outage probabilities.</div>)}
             {!aep && <div className="muted">Predicted from {scenario === "live" ? "the forecast" : "the simulation"}. Outages
-              are shown by area (5+ customers), never by home. The blue dot is your home.</div>}
+              are shown by area (5+ customers), never by home.{guest ? " Sign in to see your own home and risk."
+              : " The blue dot is your home."}</div>}
           </div>
           </details>
         </div>

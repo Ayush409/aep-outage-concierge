@@ -25,14 +25,12 @@ export function Login() {
   const [password, setPassword] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [demo, setDemo] = useState(null);
-  useEffect(() => { api("/api/demo/households").then(setDemo).catch(() => {}); }, []);
-  async function tryDemo(household) {
+  async function tryGuest() {
     setBusy(true); setErr("");
     try {
-      const result = await api("/api/auth/demo", { method: "POST", body: { household } });
-      setScenario(result.scenario);
-      await refresh(); nav("/status");
+      await api("/api/auth/guest", { method: "POST" });
+      setScenario("live");
+      await refresh(); nav("/map");
     } catch (e) { setErr(e.message); }
     finally { setBusy(false); }
   }
@@ -54,12 +52,12 @@ export function Login() {
 
   return (
     <AuthCard title="Sign in" subtitle="Storm outage risk, restoration estimates and alerts for your home.">
-      {demo?.enabled && <section className="demo-entry stack">
-        <h2>Try an anonymous household</h2>
-        <p className="small secondary">Explore a storm with a fresh demo profile. No personal details or text messages required.</p>
-        {demo.households.map((h) => <button type="button" key={h.id} disabled={busy} onClick={() => tryDemo(h.id)}>{h.label}</button>)}
-        {busy && <div className="small" role="status">Preparing your household…</div>}
-      </section>}
+      <section className="demo-entry stack">
+        <h2>Anonymous household</h2>
+        <p className="small secondary">See the outage map without an account or your address. Outages are shown by
+          area only.</p>
+        <button type="button" disabled={busy} onClick={tryGuest}>View the outage map anonymously</button>
+      </section>
       <form className="stack" onSubmit={submit}>
         <label className="field"><span>Email</span>
           <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required />

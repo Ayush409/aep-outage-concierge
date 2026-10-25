@@ -68,7 +68,6 @@ export default function ModelAudit() {
         <section className="card stack">
           <h2>Assumptions and limits</h2>
           <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{m.assumptions.map((a) => <li key={a}>{a}</li>)}</ul>
-          <div className="small"><b>Excluded:</b> {fmt.n(m.excluded_records?.january)} January damage records.</div>
           <div className="small"><b>Strongest weather in training:</b> gusts {fmt.n(m.train_range.gust_max)} mph, freezing rain
             {" "}{m.train_range.frz.toFixed(2)} in, low {fmt.n(m.train_range.tmin)} °F, high {fmt.n(m.train_range.tmax)} °F.
             Scenarios beyond this are flagged lower confidence.</div>

@@ -4,8 +4,10 @@ Run (from repo root):  .venv/Scripts/python -m uvicorn app.main:app --app-dir ba
 """
 import json
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Literal
 
@@ -37,6 +39,33 @@ def _startup():
     db.set_setting("active_scenario", "live")
     grid()
     simulate.asset_hours()
+    threading.Thread(target=_warm_up, daemon=True).start()
+
+
+def _warm_up():
+    """Pre-run every scenario and the registered customers' pages (incl. the Claude texts, which are cached on
+    disk), so nobody waits on a cold start. Failures are ignored - the pages compute on demand anyway."""
+    for sid in SCENARIOS:
+        try:
+            sim(params(scenario=sid))
+        except Exception:
+            pass
+    for sid in SCENARIOS:  # Business Impact's crew-cost curve (8 quick runs each)
+        try:
+            aep_crew_curve(scenario=sid, user=None)
+        except Exception:
+            pass
+    with db.tx() as con:
+        uids = [r["user_id"] for r in con.execute("SELECT c.user_id FROM customer_profiles c JOIN users u ON u.id = c.user_id "
+                                                  "WHERE u.is_demo = 0").fetchall()]
+    for sid in SCENARIOS:
+        for uid in uids[:10]:
+            try:
+                me = dict(id=uid, role="customer")
+                my_status(params(scenario=sid), me)
+                my_prepare(params(scenario=sid), me)
+            except Exception:
+                pass
 
 
 # ------------------------------------------------------------------ helpers
@@ -116,7 +145,10 @@ def _cause_text(lc: dict | None) -> tuple[str | None, str | None]:
 
 def customer_view(res: dict, pidx: int, needs: list[str], prefs: dict | None = None) -> dict:
     st = views.premise_status(res, pidx)
-    st["confidence"] = dict(level="Limited", notes=[experience.LIMITATION] + st["confidence"]["notes"])
+    # each scenario's own confidence level and reasons, always followed by the experimental-model caveat
+    c = st["confidence"]
+    reasons = c["notes"] or ["The weather is within the range of the storms the model was trained on."]
+    st["confidence"] = dict(level=c["level"], notes=reasons + [experience.LIMITATION])
     st["risk"]["observed"] = None  # saved band calibration is not informative enough for customer probabilities
     sc = res["scenario"]
     cause, fixed = _cause_text(st["likely_cause"])
@@ -153,45 +185,12 @@ def customer_view(res: dict, pidx: int, needs: list[str], prefs: dict | None = N
                 communications=comms, alerts=elig, preparation=prep, generated_at=time.time())
 
 
-DEMO_HOUSEHOLDS = {
-    "overhead": "Overhead-service household",
-    "underground": "Underground-service household",
-    "medical": "Household with a declared medical-device need",
-}
-
-
-@app.get("/api/demo/households")
-def demo_households():
-    return dict(enabled=DEV_MODE, households=[dict(id=k, label=v) for k, v in DEMO_HOUSEHOLDS.items()] if DEV_MODE else [])
-
-
-class DemoLogin(BaseModel):
-    household: Literal["overhead", "underground", "medical"]
-
-
-@app.post("/api/auth/demo")
-def demo_login(body: DemoLogin, resp: Response):
-    if not DEV_MODE:
-        raise HTTPException(404)
-    g = grid()
-    res = sim(params(scenario="snow_storm"))
-    candidates = np.flatnonzero((g.prem.service_kind == ("Underground" if body.household == "underground" else "Overhead")).to_numpy())
-    if not len(candidates):
-        raise HTTPException(503, "Demo household data is unavailable")
-    # Prefer an affected anonymous premise for a complete demonstration.
-    pidx = int(candidates[np.argmax(res["p_out"][candidates])])
-    pr = g.prem.iloc[pidx]
-    needs = ["medical_device"] if body.household == "medical" else []
-    with db.tx() as con:
-        cur = con.execute("INSERT INTO users(email,name,pw_hash,role,created,is_demo) VALUES (?,?,?,'customer',?,1)",
-                          (f"{secrets.token_hex(12)}@anonymous.demo.invalid", DEMO_HOUSEHOLDS[body.household],
-                           hash_password(secrets.token_urlsafe(32)), time.time()))
-        uid = cur.lastrowid
-        con.execute("INSERT INTO customer_profiles(user_id,premise,address_enc,zip_enc,needs_enc,alerts_sms,alerts_inapp) "
-                    "VALUES (?,?,?,?,?,0,1)",
-                    (uid, pr.premise, encrypt("Anonymous demo home"), encrypt(str(pr.zip)), encrypt(json.dumps(needs))))
-    _set_cookie(resp, make_session(uid, "customer"))
-    return dict(ok=True, scenario="snow_storm")
+@app.post("/api/auth/guest")
+def guest_login(resp: Response):
+    """Anonymous household: view the outage map without an account or address. Nothing is stored; the session can
+    only reach the shared, area-level map endpoints (every /api/me and /api/aep route rejects it)."""
+    _set_cookie(resp, make_session(0, "guest"))
+    return dict(ok=True)
 
 
 # ------------------------------------------------------------------ auth
@@ -453,7 +452,7 @@ def _when(start: str, hours: float | None) -> str | None:
     if hours is None:
         return None
     t = datetime.fromisoformat(start) + timedelta(hours=float(hours))
-    return t.strftime("%a %b %d, %I %p").replace(" 0", " ")
+    return t.strftime("%a %b %d, %I %p ET").replace(" 0", " ")
 
 
 @app.post("/api/me/chat")
@@ -469,7 +468,7 @@ def my_chat(body: ChatBody, user=Depends(require_customer)):
     t = ev["timeline"]
     facts = dict(
         scenario=v["scenario"]["name"], is_simulation=v["scenario"]["kind"] != "live",
-        now=datetime.now().strftime("%a %b %d, %I %p").replace(" 0", " ") if v["scenario"]["kind"] == "live" else None,
+        now=datetime.now(ZoneInfo("America/New_York")).strftime("%a %b %d, %I %p ET").replace(" 0", " ") if v["scenario"]["kind"] == "live" else None,
         band=v["risk"]["band"], area=ev["area"], area_lost_share=ev["area_share"], home_lost_share=ev["home_share"],
         simulated_runs=ev["runs"], confidence=v["confidence"]["level"], confidence_notes=v["confidence"]["notes"],
         factors=v["factors_plain"], service=v["premise"]["service"], peak_weather=v["risk"]["weather"],
@@ -647,7 +646,7 @@ def aep_areas(hour: float | None = None, p: simulate.Params = Depends(params), u
 
 @app.get("/api/aep/jobs")
 def aep_jobs(p: simulate.Params = Depends(params), user=Depends(require_aep)):
-    return views.jobs(sim(p))
+    return views.jobs(sim(p), limit=3000)
 
 
 @app.get("/api/aep/jobs/{job}")
@@ -689,9 +688,11 @@ def aep_chat(body: ChatBody, user=Depends(require_aep)):
     res = sim(p)
     o = views.overview(res, aep=True)
     sc = SCENARIOS[p.scenario]
-    start, curve = o["start"], o["curve"]
-    peak = max(range(len(curve["p50"])), key=lambda i: curve["p50"][i]) if curve["p50"] else None
-    areas = views.area_outages(res)
+    start = o["start"]
+    # peak of the map's run (same as the map's "Jump to peak"); a quiet forecast's median curve is flat at zero
+    tot = views.frames(res)["total"]
+    peak = max(range(len(tot)), key=lambda i: tot[i]) if tot and max(tot) > 0 else None
+    areas = views.area_outages(res, hour=peak)
     jl = views.jobs(res)
     by_type: dict[str, int] = {}
     for j in jl:
@@ -707,7 +708,7 @@ def aep_chat(body: ChatBody, user=Depends(require_aep)):
     what_if = []
     for f in (0.5, 1, 2):  # quick 12-run crew what-ifs (same storm)
         lc, ma = max(1, round(p.crews * f)), round(p.mutual_aid_crews * f)
-        s_ = sim(simulate.Params(scenario=p.scenario, crews=lc, mutual_aid_crews=ma,
+        s_ = simulate.summary(simulate.Params(scenario=p.scenario, crews=lc, mutual_aid_crews=ma,
                                  mutual_aid_day=p.mutual_aid_day, gust_mult=p.gust_mult, access_mult=p.access_mult,
                                  snow_mult=p.snow_mult, runs=12))["summary"]
         what_if.append(dict(local_crews=lc, mutual_aid_crews=ma, hours_to_90pct=s_["hours_to_90pct"],
@@ -718,15 +719,15 @@ def aep_chat(body: ChatBody, user=Depends(require_aep)):
     c = o["cost"]
     facts = dict(
         scenario=sc["name"], is_simulation=sc["kind"] != "live", window_start=_when(start, 0),
-        now=datetime.now().strftime("%a %b %d, %I %p").replace(" 0", " ") if sc["kind"] == "live" else None,
+        now=datetime.now(ZoneInfo("America/New_York")).strftime("%a %b %d, %I %p ET").replace(" 0", " ") if sc["kind"] == "live" else None,
         learned_from=sc.get("learned_from"), scenario_notes=sc.get("notes"),
         crews=dict(local=p.crews, mutual_aid=p.mutual_aid_crews, mutual_aid_arrives_day=p.mutual_aid_day,
                    note="Scenario default crews. Operators can try other numbers with the Simulation tab sliders."),
         crew_what_if=what_if,
         operations=o["operations"], confidence=o["confidence"], summary=o["summary"],
-        peak=dict(hour=curve["hours"][peak], at=_when(start, curve["hours"][peak]),
-                  customers_out_p10=curve["p10"][peak], customers_out_p50=curve["p50"][peak],
-                  customers_out_p90=curve["p90"][peak]) if peak is not None else None,
+        peak=dict(hour=peak, at=_when(start, peak), customers_out_in_map_run=tot[peak],
+                  peak_out_across_runs=o["summary"]["peak_out"]) if peak is not None else
+        "No outages in the map's run; see summary for the range across runs.",
         worst_zips_at_peak=areas["zip"][:8], worst_circuits_at_peak=areas["circuit"][:8],
         jobs_typical_run=dict(count=len(jl), by_type=by_type, access_issues=sum(j["access_issue"] for j in jl),
                               special_equipment=sum(j["special_equipment"] for j in jl),
@@ -779,16 +780,19 @@ def aep_crew_curve(scenario: str | None = None, user=Depends(require_aep)):
     sid = scenario or db.get_setting("active_scenario")
     rows = []
     for crews in (10, 20, 30, 45, 60, 90, 120, 160):
-        res = sim(simulate.Params(scenario=sid, crews=crews, mutual_aid_crews=crews, runs=12))
+        res = simulate.summary(simulate.Params(scenario=sid, crews=crews, mutual_aid_crews=crews, runs=12))
         c = res["cost"]
         if c is None:
             continue
         repair = c["repair"]["labor_local"] + c["repair"]["labor_mutual_aid"] + c["repair"]["lodging"] + \
             c["repair"]["equipment"]
-        # standby cost: crews are paid for their shifts even when idle (assumption: 16 h/day while restoring)
-        days = max(res["summary"]["hours_to_all"]["p50"] / 24, 0.5)
-        standby = 2 * crews * 4 * 16 * days * 41.30 * 1.5
-        repair = max(repair, standby)
+        # standby cost: in storm mode every crew is paid for 16 h/day from the first outage until the last customer
+        # is restored, even when idle (assumption). Normal operations use 24/7 trouble crews already on shift.
+        s_ = res["summary"]
+        if (res.get("operations") or {}).get("storm_mode"):
+            onset = s_["hours_to_90pct"]["p50"] - s_["hours_onset_to_90pct"]["p50"]
+            days = max((s_["hours_to_all"]["p50"] - onset) / 24, 0.5)
+            repair = max(repair, 2 * crews * 4 * 16 * days * 41.30 * 1.5)
         rows.append(dict(crews=crews * 2, repair=round(repair), lost_revenue=c["lost_revenue"],
                          customer_cost=c["customer_cost"], total=round(repair + c["lost_revenue"] + c["customer_cost"]),
                          hours_to_90=res["summary"]["hours_to_90pct"]["p50"]))
@@ -906,6 +910,89 @@ def aep_send_alerts(kind: Literal["pre_storm", "outage_confirmed", "estimate_upd
     return dict(messages=sent, customers=len(custs), escalations=ops, skipped=skipped)
 
 
+TIMELINE_TITLES = dict(ops_summary="Storm outlook (AEP operations)", pre_storm="Storm alert",
+                       outage_confirmed="Outage confirmed", estimate_updated="Estimate updated",
+                       restored="Power restored", escalation="Escalation: declared medical need")
+
+
+def alert_timeline(sid: str, only_user: int | None = None) -> list[dict]:
+    """Every alert the selected forecast / storm would send, generated automatically from the simulation's map run
+    and stamped with the simulated time it would go out. Nothing is delivered: storm drills are in-app practice only,
+    and the live forecast stops at the pre-storm stage (no real outage feed is connected)."""
+    p = params(scenario=sid)
+    res = sim(p)
+    sc = SCENARIOS[sid]
+    live = sc["kind"] == "live"
+    t0 = datetime.fromisoformat(res["time"][0])
+    tag = "" if live else "[Simulation] "
+    # storm onset: first hour the map run has 5% of its peak out (an isolated early fault is not "the storm")
+    tot = np.array(views.frames(res)["total"] or [0])
+    onset = float(np.argmax(tot >= max(5.0, 0.05 * tot.max()))) if tot.max() > 0 else None
+    threshold = db.get_setting("customer_alert_threshold")
+    one_lower = db.get_setting("life_support_one_band_lower") == "1"
+    out = []
+
+    def add(kind, hour, body, user_id=None, customer=None, band=None, channel="in-app"):
+        hour = max(float(hour), 0.0)
+        out.append(dict(kind=kind, title=("Practice: " if not live and user_id else "") + TIMELINE_TITLES[kind],
+                        body=tag + body, hour=round(hour, 2), at=(t0 + timedelta(hours=hour)).isoformat(),
+                        user_id=user_id, customer=customer, band=band, channel=channel,
+                        escalation=kind == "escalation"))
+
+    s = res["summary"]
+    if only_user is None and onset is not None:
+        add("ops_summary", onset - 24,
+            f"{sc['name']}: about {s['customers_out']['p50']:,.0f} customers expected to lose power (range "
+            f"{s['customers_out']['p10']:,.0f}-{s['customers_out']['p90']:,.0f}), about {s['jobs']['p50']:,.0f} repair "
+            f"jobs; 90% restored about {s['hours_onset_to_90pct']['p50']:,.0f} h after the first outage.", channel="ops")
+    with db.tx() as con:
+        q = ("SELECT u.id AS uid, u.name, c.* FROM users u JOIN customer_profiles c ON c.user_id = u.id"
+             + (" WHERE u.id = ?" if only_user is not None else ""))
+        custs = con.execute(q, (only_user,) if only_user is not None else ()).fetchall()
+    for c in custs:
+        if not c["alerts_inapp"]:
+            continue  # customer turned in-app alerts off; drills never text
+        needs = json.loads(decrypt(c["needs_enc"]) or "[]") if c["needs_enc"] else []
+        st = views.premise_status(res, _premise_idx(c["premise"]))
+        band, tl, est = st["risk"]["band"], st["event"]["timeline"], st["restoration"]
+        who = dict(user_id=c["uid"], customer=c["name"], band=band)
+        elig = guidance.alert_eligibility(band, threshold, needs, one_lower, False, True, False)
+        hits = tl["power_lost"] if tl else onset  # ~24 h before this home's own outage (or the storm's onset)
+        if elig["eligible"] and hits is not None:
+            medical = " Plan backup power for your medical equipment now." if any(
+                n in needs for n in ("medical_device", "life_support")) else ""
+            add("pre_storm", hits - 24, f"{band} outage risk for your area: damaging weather is expected in about 24 "
+                "hours. Charge phones and power banks and review your preparation checklist." + medical, **who)
+        if live or not tl:
+            continue
+        label = est["label"] if est else f"about {tl['hours_out']:g} h"
+        add("outage_confirmed", tl["confirmed"], f"Your power is out. Estimated restoration: {label}.", **who)
+        if tl.get("estimate_updated") is not None:
+            left = tl["restored"] - tl["estimate_updated"]
+            add("estimate_updated", tl["estimate_updated"],
+                f"Crews are working in your area. Updated estimate: power back in about {left:.0f} h.", **who)
+        add("restored", tl["restored"], f"Power restored after about {tl['hours_out']:g} h. If you are still out, "
+            "report it to AEP at 1-800-956-4237.", **who)
+        if only_user is None and any(n in needs for n in ("medical_device", "life_support")):
+            add("escalation", tl["confirmed"], f"{c['name']} declared a medical need and is modeled out for about "
+                f"{tl['hours_out']:g} h - check on them and prioritise their line.", channel="ops")
+    return sorted(out, key=lambda a: (a["hour"], a["escalation"]))
+
+
+@app.get("/api/aep/alerts/timeline")
+def aep_alert_timeline(scenario: str = "live", user=Depends(require_aep)):
+    if scenario not in SCENARIOS:
+        raise HTTPException(404, "Unknown scenario")
+    return dict(scenario=scenario, live=SCENARIOS[scenario]["kind"] == "live", alerts=alert_timeline(scenario))
+
+
+@app.get("/api/me/alerts/timeline")
+def my_alert_timeline(scenario: str = "live", user=Depends(require_customer)):
+    if scenario not in SCENARIOS:
+        raise HTTPException(404, "Unknown scenario")
+    return dict(scenario=scenario, alerts=alert_timeline(scenario, only_user=user["id"]))
+
+
 @app.get("/api/aep/notifications")
 def aep_notifications(user=Depends(require_aep)):
     with db.tx() as con:
@@ -933,7 +1020,7 @@ def aep_model(user=Depends(require_aep)):
                 assumptions=[
                     "Trained only on the two well-recorded local storms - Feb 2025 (freezing rain, then wind) and "
                     "Hurricane Helene (rain + wind) - with about a month of surrounding days so the model also sees "
-                    "calm weather. January damage records are excluded.",
+                    "calm weather.",
                     "Each storm type in the simulation borrows what the damage reports showed for the closest training "
                     "hazard: which equipment breaks, how often crews hit access problems, and special equipment needs.",
                     "With only one storm of each kind, the model cannot fully separate ice from heavy rain; hold-out "

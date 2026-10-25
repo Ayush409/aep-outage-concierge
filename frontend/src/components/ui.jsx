@@ -170,7 +170,8 @@ export function TimeSlider({ times, hour, setHour }) {
       <div className="row spread small">
         <span>Time</span>
         <span>
-          <b>{sel.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric" })}</b>
+          <b>{sel.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric",
+            timeZoneName: "short" })}</b>
           {live && <span className="muted"> ({relTime(ms[hour] - now)})</span>}
         </span>
       </div>

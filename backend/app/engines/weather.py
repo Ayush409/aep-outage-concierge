@@ -150,7 +150,7 @@ class Hourly:
 
     def to_json(self, step: int = 1) -> dict:
         idx = np.arange(0, self.hours, step)
-        return dict(time=[t.isoformat() for t in self.time.iloc[idx]],
+        return dict(time=iso_local(self.time.iloc[idx]),
                     lon=POINTS[:, 0].tolist(), lat=POINTS[:, 1].tolist(),
                     vars={k: np.round(self.f[k][:, idx], 1).tolist() for k in FULL_VARS})
 
@@ -172,6 +172,20 @@ def event(eid: str) -> Hourly:
 def event_meta(eid: str) -> dict:
     d = json.loads((WEATHER / f"event_{eid}.json").read_text())
     return {k: d[k] for k in ("id", "start", "end", "origin", "source_lon", "source_lat")}
+
+
+LOCAL_TZ = "America/New_York"  # weather is fetched in the service area's local time
+
+
+def iso_local(times) -> list[str]:
+    """ISO strings with the Eastern offset (e.g. -04:00), so each browser converts them to its own time zone."""
+    idx = pd.DatetimeIndex(pd.to_datetime(list(times)))
+    if idx.tz is None:
+        try:
+            idx = idx.tz_localize(LOCAL_TZ, ambiguous="infer", nonexistent="shift_forward")
+        except Exception:  # repeated fall-back hour that cannot be inferred: treat it as standard time
+            idx = idx.tz_localize(LOCAL_TZ, ambiguous=False, nonexistent="shift_forward")
+    return [t.isoformat() for t in idx]
 
 
 _live = {"t": 0.0, "h": None}
@@ -256,5 +270,5 @@ def display_live():
 
 def grid_json(h: "Hourly", grid: dict, step: int = 1) -> dict:
     idx = np.arange(0, h.hours, step)
-    return dict(time=[t.isoformat() for t in h.time.iloc[idx]], grid=grid,
+    return dict(time=iso_local(h.time.iloc[idx]), grid=grid,
                 vars={k: np.round(h.f[k][:, idx], 1).tolist() for k in FULL_VARS})
