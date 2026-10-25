@@ -54,7 +54,7 @@ def current_user(concierge_session: str | None = Cookie(default=None)) -> dict:
     except jwt.PyJWTError:
         raise HTTPException(401, "Session expired")
     with db.tx() as con:
-        row = con.execute("SELECT id, email, name, role FROM users WHERE id = ?", (int(claims["sub"]),)).fetchone()
+        row = con.execute("SELECT id, email, name, role, is_demo FROM users WHERE id = ?", (int(claims["sub"]),)).fetchone()
     if row is None:
         raise HTTPException(401, "Account not found")
     return dict(row)

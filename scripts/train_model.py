@@ -13,6 +13,7 @@
 Run:  .venv/Scripts/python scripts/train_model.py
 """
 import json
+import argparse
 import sys
 from pathlib import Path
 
@@ -85,6 +86,11 @@ class MonotonePoisson:
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ridge', type=float, default=1e-3)
+    parser.add_argument('--output', type=Path, default=risk.MODEL_PATH)
+    parser.add_argument('--no-history', action='store_true', help='Test weather/topology without the spatial damage-history feature')
+    args = parser.parse_args()
     g = grid()
     log("building daily features ...")
     f = risk.cell_day_features(history())
@@ -119,6 +125,8 @@ def main():
     poles = g.cells.poles.to_numpy() + 1
 
     def hist_rows(exclude: list[str]):
+        if args.no_history:
+            return np.zeros(len(f))
         keep = np.array([e not in exclude for e in events])
         base = cnt[:, keep].sum(axis=1)
         own = np.zeros(len(f))
@@ -128,7 +136,7 @@ def main():
         return np.log1p(100 * np.maximum(base[f.cellpos.to_numpy()] - own, 0) / poles[f.cellpos.to_numpy()])
 
     def fit(mask, X):
-        return MonotonePoisson().fit(X[mask], f.y.to_numpy()[mask], np.log(expo[mask]))
+        return MonotonePoisson().fit(X[mask], f.y.to_numpy()[mask], np.log(expo[mask]), ridge=args.ridge)
 
     def rate(m, X):
         return np.minimum(np.exp(m.intercept_ + X @ m.coef_), risk.RiskModel.MAX_DAILY_SHARE) * expo
@@ -185,6 +193,15 @@ def main():
         actual_out = g.premises_out(real.iso_dev.to_numpy())
         auc = roc_auc_score(actual_out, p_out)
         cust = g.prem_customers
+        # A training-only constant baseline, not the held-out event prevalence.
+        training_prevalence = []
+        for train_evs, _ in OUTAGE_CALIB.values():
+            if not (set(train_evs) & set(evs)):
+                train_actual = g.premises_out(dmg[dmg.event.isin(train_evs)].iso_dev.to_numpy())
+                training_prevalence.append(float(np.average(train_actual, weights=cust)))
+        baseline_p = float(np.mean(training_prevalence))
+        brier = float(np.average((p_out - actual_out.astype(float)) ** 2, weights=cust))
+        baseline_brier = float(np.average((baseline_p - actual_out.astype(float)) ** 2, weights=cust))
         bands = [risk.band(p) for p in p_out]
         rel = (pd.DataFrame(dict(band=bands, p=p_out, out=actual_out, w=cust))
                .groupby("band").apply(lambda d: pd.Series(dict(
@@ -196,6 +213,9 @@ def main():
             premise_auc=round(float(auc), 3),
             predicted_customers_out=int((p_out * cust).sum()), actual_customers_out=int(cust[actual_out].sum()),
             outage_cluster_size=outage["cluster_size"],
+            brier=round(brier, 5), baseline_brier=round(baseline_brier, 5),
+            baseline_probability=round(baseline_p, 5), total_customers=int(cust.sum()),
+            target_description='Topology-derived customers downstream of recorded damage; not verified outage telemetry',
             reliability={k: {kk: round(v, 3) if isinstance(v, float) else v for kk, v in r.items()}
                          for k, r in rel.to_dict(orient="index").items()},
         )
@@ -243,9 +263,12 @@ def main():
                trained_on="Feb 1 - Mar 3, 2025 and Sep 8 - Oct 20, 2024", training_storms=list(WINDOWS),
                rows=int(len(f)), damage_records=int(f.y.sum()), hazard_behaviour=behaviour,
                excluded_records=dict(january=int(jan.sum())))
-    risk.MODEL_PATH.write_text(json.dumps(out, indent=1))
+    out['experiment'] = dict(ridge=args.ridge, history_enabled=not args.no_history,
+                             status='Exploratory: comparisons reuse two hold-outs; not independent validation')
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(out, indent=1))
     log("coefficients", dict(zip(out["features"], out["coef"])), "intercept", out["intercept"])
-    log("saved", risk.MODEL_PATH)
+    log("saved", args.output)
 
 
 if __name__ == "__main__":

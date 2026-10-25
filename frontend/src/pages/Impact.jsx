@@ -52,8 +52,7 @@ export default function Impact() {
       </section>
       <section className="card stack">
         <h2>How many crews? The cost trade-off</h2>
-        <div className="small muted">More crews cost AEP more (overtime, mutual aid, standby) but cut customer-hours without
-          power. The total is lowest in the middle.</div>
+        <div className="small muted">Compare modeled crew cost with customer-hours without power. The lowest-cost option depends on this event and the cost assumptions; inspect the results before choosing a staffing level.</div>
         {!curve ? <Loading what="Simulating crew levels" /> : <CrewCurve rows={curve.rows} />}
       </section>
     </div>

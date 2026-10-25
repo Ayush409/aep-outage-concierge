@@ -25,9 +25,9 @@ def alert_eligibility(band: str, threshold: str, needs: list[str], one_lower: bo
     eff = effective_threshold(threshold, needs, one_lower)
     eligible = band_index(band) >= band_index(eff)
     channels = []
-    if eligible and inapp:
+    if inapp:
         channels.append("in-app")
-    if eligible and sms and has_phone:
+    if sms and has_phone:
         channels.append("SMS")
     reason = (f"Your risk band ({band}) meets the alert level AEP set ({eff})." if eligible else
               f"Your risk band ({band}) is below the alert level AEP set ({eff}). You'll still see updates here.")

@@ -4,7 +4,6 @@ import { api } from "./api.js";
 import { Login, Register, Forgot, Reset, Mailbox } from "./pages/Auth.jsx";
 import CustomerMap from "./pages/CustomerMap.jsx";
 import MyStatus from "./pages/MyStatus.jsx";
-import Prepare from "./pages/Prepare.jsx";
 import Alerts from "./pages/Alerts.jsx";
 import MyData from "./pages/MyData.jsx";
 import Simulation from "./pages/Simulation.jsx";
@@ -14,12 +13,14 @@ import Impact from "./pages/Impact.jsx";
 import Comms from "./pages/Comms.jsx";
 import ModelAudit from "./pages/ModelAudit.jsx";
 import ChatWidget from "./components/ChatWidget.jsx";
+import { applyTheme, initialTheme } from "./theme.js";
+import ReadyPlan from "./pages/ReadyPlan.jsx";
 
 const Ctx = createContext(null);
 export const useApp = () => useContext(Ctx);
 
 const CUSTOMER_TABS = [
-  ["/status", "My Status"], ["/map", "Map"], ["/prepare", "Prepare"], ["/alerts", "Alerts"],
+  ["/status", "My Status"], ["/map", "Map"], ["/alerts", "Alerts"],
   ["/data", "My Data & Privacy"],
 ];
 const AEP_TABS = [
@@ -28,11 +29,20 @@ const AEP_TABS = [
 ];
 
 export default function App() {
+  const [theme, setTheme] = useState(initialTheme);
+  const toggleTheme = () => setTheme((current) => {
+    const next = current === "dark" ? "light" : "dark";
+    applyTheme(next);
+    return next;
+  });
   const [user, setUser] = useState(undefined);
   const [scenarios, setScenarios] = useState([]);
   // one selection drives every tab: the live 7-day forecast (default) or a storm simulation
   const [scenario, setScenario] = useState("live");
   const [bandOutcomes, setBandOutcomes] = useState({});
+  const [journeys, setJourneys] = useState({});
+  const [customerRevision, setCustomerRevision] = useState(0);
+  const [journeyError, setJourneyError] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -46,14 +56,32 @@ export default function App() {
     }
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    let active = true;
+    setJourneyError("");
+    if (user?.role === "customer") {
+      api(`/api/me/journey?scenario=${encodeURIComponent(scenario)}`).then((j) => {
+        if (active) setJourneys((old) => ({ ...old, [`${user.id}:${scenario}`]: j }));
+      }).catch((e) => { if (active) setJourneyError(e.message); });
+    }
+    return () => { active = false; };
+  }, [user?.id, scenario]);
 
   if (user === undefined) return <div className="auth"><div className="card">Loading...</div></div>;
 
   const home = user?.role === "aep" ? "/ops" : "/status";
-  const ctx = { user, refresh, scenarios, scenario, setScenario, bandOutcomes };
+  const journey = journeys[`${user?.id}:${scenario}`];
+  const updateJourney = (next) => {
+    setJourneys((old) => ({ ...old, [`${user.id}:${scenario}`]: next }));
+    setCustomerRevision((n) => n + 1);
+  };
+  const customerParams = { scenario, access_mult: journey?.access_mult ?? 1 };
+  const ctx = { user, refresh, scenarios, scenario, setScenario, bandOutcomes, theme, toggleTheme,
+    journey, journeyError, updateJourney, customerParams, customerRevision };
 
   return (
     <Ctx.Provider value={ctx}>
+      {!user && <div className="auth-theme-toggle"><ThemeToggle /></div>}
       <Routes>
         <Route path="/login" element={user ? <Navigate to={home} /> : <Login />} />
         <Route path="/register" element={user ? <Navigate to={home} /> : <Register />} />
@@ -68,6 +96,15 @@ export default function App() {
       </Routes>
     </Ctx.Provider>
   );
+}
+
+function ThemeToggle() {
+  const { theme, toggleTheme } = useApp();
+  return <button className="theme-toggle" onClick={toggleTheme} aria-pressed={theme === "dark"}
+    aria-label={`Dark mode: ${theme === "dark" ? "on" : "off"}. Switch to ${theme === "dark" ? "light" : "dark"} mode`}>
+    <span aria-hidden="true">{theme === "dark" ? "☀" : "☾"}</span>
+    {theme === "dark" ? "Light mode" : "Dark mode"}
+  </button>;
 }
 
 function Shell() {
@@ -97,7 +134,7 @@ function Shell() {
   }
 
   return (
-    <div className="shell">
+    <div className={`shell${aep ? " operator-shell" : ""}`}>
       <header className="topbar">
         <div className="logo"><span className="logo-mark" aria-hidden="true">⚡</span>AEP Outage Concierge<small>{aep ? "Operations" : "Customer"}</small></div>
         <nav className="tabs" aria-label="Sections">
@@ -106,6 +143,7 @@ function Shell() {
           ))}
         </nav>
         <div className="who">
+          <ThemeToggle />
           <select className="mode-select" value={scenario} onChange={(e) => setScenario(e.target.value)}
             aria-label="Forecast or storm simulation">
             {scenarios.map((s) => (
@@ -139,9 +177,10 @@ function Shell() {
             <>
               <Route path="/map" element={<CustomerMap />} />
               <Route path="/status" element={<MyStatus />} />
-              <Route path="/prepare" element={<Prepare />} />
+              <Route path="/prepare" element={<Navigate to="/alerts" replace />} />
               <Route path="/alerts" element={<Alerts />} />
               <Route path="/data" element={<MyData />} />
+              <Route path="/ready" element={<ReadyPlan />} />
               <Route path="*" element={<Navigate to="/status" />} />
             </>
           )}

@@ -27,6 +27,7 @@ FIELD_KEY = _ensure("FIELD_ENCRYPTION_KEY", lambda: Fernet.generate_key().decode
 DB_PATH = Path(os.environ.get("DB_PATH", BACKEND / "concierge.db"))
 DEV_MODE = os.environ.get("DEV_MODE", "1") == "1"  # enables the dev mailbox page
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5-5")
+AI_ENABLED = os.environ.get("AI_ENABLED", "1") == "1"
 TWILIO_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_FROM = os.environ.get("TWILIO_FROM_NUMBER")

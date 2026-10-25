@@ -27,7 +27,7 @@ const NEEDS = {
 };
 
 export default function MyData() {
-  const { refresh, scenario } = useApp();
+  const { refresh, scenario, customerParams, customerRevision } = useApp();
   const nav = useNavigate();
   const [p, setP] = useState(null);
   const [phone, setPhone] = useState("");
@@ -35,7 +35,7 @@ export default function MyData() {
   const [codeSent, setCodeSent] = useState(null);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
-  const status = useFetch(`/api/me/status${qs({ scenario })}`, [scenario, p?.phone_verified]).data;
+  const status = useFetch(`/api/me/status${qs(customerParams)}`, [scenario, customerParams.access_mult, customerRevision, p?.phone_verified]).data;
   useEffect(() => { api("/api/me/profile").then((d) => { setP(d); setPhone(d.phone || ""); }); }, []);
   if (!p) return <div className="page"><Loading /></div>;
 
@@ -62,7 +62,7 @@ export default function MyData() {
     setCode("");
   }, "Phone verified");
   async function del() {
-    if (!window.confirm("Delete your account and all stored data? This can't be undone.")) return;
+    if (!window.confirm("Delete your account, profile, and linked notifications? Audit records and demo mailbox entries may remain. This can't be undone.")) return;
     await api("/api/me", { method: "DELETE" });
     await refresh();
     nav("/login");
@@ -70,8 +70,18 @@ export default function MyData() {
 
   const phoneChanged = phone !== (p.phone || "");
   return (
-    <div className="page">
-      <div className="grid cols-2">
+    <div className="page customer-readable privacy-page">
+      <header className="privacy-heading">
+        <h1>My Data &amp; Privacy</h1>
+        <p className="secondary">Manage your alerts and personal information, and see how your data is used.</p>
+      </header>
+      <dl className="privacy-status" aria-label="Your current account settings">
+        <div><dt>Mobile number</dt><dd>{p.phone_verified ? "Verified" : p.phone ? "Needs verification" : "Not added"}</dd></div>
+        <div><dt>Text alerts</dt><dd>{!p.phone_verified ? "Verification required" : p.alerts_sms ? "On" : "Off"}</dd></div>
+        <div><dt>In-app alerts</dt><dd>{p.alerts_inapp ? "On" : "Off"}</dd></div>
+      </dl>
+      <div className="privacy-layout">
+        <div className="privacy-column" role="region" aria-label="Your settings">
         <section className="card stack">
           <h2>Your information</h2>
           <table><tbody>
@@ -113,6 +123,7 @@ export default function MyData() {
 
         <section className="card stack">
           <h2>Alert preferences</h2>
+          <p className="secondary">Choose how to receive storm and outage updates. You can change these preferences at any time.</p>
           {status && <div className="small">{status.alerts.reason}</div>}
           <label className="check"><input type="checkbox" checked={p.alerts_inapp}
             onChange={(e) => save({ alerts_inapp: e.target.checked })} /><span>In-app alerts</span></label>
@@ -120,8 +131,9 @@ export default function MyData() {
             onChange={(e) => save({ alerts_sms: e.target.checked })} />
             <span>Text message alerts {p.phone_verified ? `to ${p.phone}` : "(verify a mobile number first)"}</span></label>
           {status && <>
-            <div className="small" style={{ fontWeight: 600 }}>When we'd message you</div>
-            <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{status.alerts.timing.map((t) => <li key={t}>{t}</li>)}</ul>
+            <div className="small" style={{ fontWeight: 600 }}>How updates work in this prototype</div>
+            <p className="small secondary">Practice messages follow the storm journey in My Status: preparation, outage, a changed estimate, and restoration. They stay in-app and respect your preferences; some steps may not produce a message if your home keeps power or its estimate is unchanged.</p>
+            <p className="small secondary">Live pre-storm alerts require an operator to send them. Automatic outage confirmations and restoration updates need a utility status feed, which is not connected yet.</p>
           </>}
         </section>
 
@@ -139,21 +151,49 @@ export default function MyData() {
             </div>
           ))}
           <div className="small muted">It does not guarantee faster restoration. AEP's own life-support records are what
-            crews prioritize. The AI assistant only sees the category (e.g. "medical equipment"), never details.</div>
+            crews prioritize. Guidance uses the categories you select. Anything you type in chat may also be sent to the AI provider.</div>
         </section>
-
+        </div>
+        <aside className="privacy-column" aria-label="Privacy summary and data controls">
         <section className="card stack">
-          <h2>How we protect your data</h2>
+          <h2>Your privacy at a glance</h2>
           <div><b>Encrypted before storage:</b> {p.stored.encrypted.join(", ")}.</div>
           <div><b>Stored as-is:</b> {p.stored.plain.join(", ")}. Passwords are stored only as a one-way hash.</div>
-          <div><b>Never sent to the AI assistant:</b> {p.stored.never_shared_with_ai.join(", ")}.</div>
+          <div><b>Excluded from automatic AI context:</b> {p.stored.never_shared_with_ai.join(", ")}. Personal information you type into chat can still be shared with the AI provider.</div>
           <div><b>On maps:</b> other customers see outages by area (5+ customers), never your home.</div>
+        </section>
+        <section className="card stack">
+          <h2>Who can access your data</h2>
+          <p>AEP operator accounts can view customer names, emails, ZIP codes, and declared needs to support outage planning. Access to the customer list is logged.</p>
+          <h3>External services</h3>
+          <ul className="privacy-list">
+            <li><b>Address lookup:</b> your address and ZIP are sent to the US Census geocoder during registration.</li>
+            <li><b>Text delivery:</b> when configured, Twilio receives your mobile number and the messages sent to it.</li>
+            <li><b>AI assistance:</b> when available, Claude receives selected outage facts and declared needs for guidance, plus conversation messages when you use chat.</li>
+          </ul>
+          <details className="privacy-details">
+            <summary>Chat history and browser storage</summary>
+            <p>Chat history is held in browser memory and is not saved as message text in the app database. Closing the chat panel does not clear it. Refreshing the page or signing out clears the conversation from the interface.</p>
+            <p>A session cookie keeps you signed in. Your light or dark mode preference is saved in this browser.</p>
+          </details>
+        </section>
+        <section className="card stack">
+            <h2>Your data controls</h2>
+            <p>Download a JSON copy of your profile, alert preferences, declared needs, and notification history to review what is stored.</p>
+            <p className="small secondary">Checklist completion and practice-journey progress are saved to your account and included in the download. An outage-ready HTML plan is saved only when you download it; remove that file from your device yourself.</p>
+            <details className="privacy-details">
+              <summary>What happens when you delete your account?</summary>
+              <p>Deletion signs you out and removes your account, linked profile, checklist completion, practice journeys, customer notifications, dispatch records, reset tokens, and phone verification codes. Audit records and demo mailbox entries are not automatically removed. The app has no automatic retention schedule.</p>
+              <p>Download your data first if you want to keep a copy. The download does not include audit records or demo mailbox entries.</p>
+            </details>
+            <Link to="/alerts">Review your notifications and preparation plan</Link>
           <hr />
           <div className="row">
-            <a href="/api/me/export"><button>Download my data</button></a>
+            <a className="privacy-download" href="/api/me/export">Download my data</a>
             <button onClick={del} style={{ color: "var(--band-severe)" }}>Delete my account</button>
           </div>
         </section>
+        </aside>
       </div>
     </div>
   );

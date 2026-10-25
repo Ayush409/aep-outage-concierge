@@ -1,0 +1,357 @@
+{
+  "active_model_sha256": "5588f619565b5da5fbe4995a5248a95db0ded331da3b3ad35636976775fccc1c",
+  "experiments": [
+    {
+      "id": "baseline",
+      "label": "Current model (ridge 0.001)",
+      "settings": {
+        "ridge": 0.001,
+        "history_enabled": true,
+        "status": "Exploratory: comparisons reuse two hold-outs; not independent validation"
+      },
+      "validation": {
+        "helene_2024": {
+          "trained_without": "helene_2024",
+          "label": "Trained on Feb 2025 (ice + wind) only, then predicted Hurricane Helene (rain + wind)",
+          "predicted_damage": 6043.6,
+          "actual_damage": 194,
+          "cell_rank_corr": 0.319,
+          "premise_auc": 0.622,
+          "predicted_customers_out": 195785,
+          "actual_customers_out": 21622,
+          "outage_cluster_size": 1.226,
+          "brier": 0.62007,
+          "baseline_brier": 0.08248,
+          "baseline_probability": 0.13209,
+          "total_customers": 244662,
+          "target_description": "Topology-derived customers downstream of recorded damage; not verified outage telemetry",
+          "reliability": {
+            "Elevated": {
+              "customers": 13687.0,
+              "predicted": 0.288,
+              "actual": 0.039
+            },
+            "High": {
+              "customers": 30477.0,
+              "predicted": 0.497,
+              "actual": 0.013
+            },
+            "Low": {
+              "customers": 267.0,
+              "predicted": 0.017,
+              "actual": 0.0
+            },
+            "Severe": {
+              "customers": 200231.0,
+              "predicted": 0.882,
+              "actual": 0.103
+            }
+          }
+        },
+        "feb_2025_wind": {
+          "trained_without": "feb_2025_wind",
+          "label": "Trained on the Feb 2025 ice phase + Helene, then predicted the Feb 2025 wind phase",
+          "predicted_damage": 58.1,
+          "actual_damage": 184,
+          "cell_rank_corr": 0.383,
+          "premise_auc": 0.586,
+          "predicted_customers_out": 5817,
+          "actual_customers_out": 29995,
+          "outage_cluster_size": 1.448,
+          "brier": 0.11685,
+          "baseline_brier": 0.10763,
+          "baseline_probability": 0.11498,
+          "total_customers": 244662,
+          "target_description": "Topology-derived customers downstream of recorded damage; not verified outage telemetry",
+          "reliability": {
+            "Elevated": {
+              "customers": 1074.0,
+              "predicted": 0.233,
+              "actual": 0.018
+            },
+            "High": {
+              "customers": 282.0,
+              "predicted": 0.435,
+              "actual": 0.894
+            },
+            "Low": {
+              "customers": 243306.0,
+              "predicted": 0.022,
+              "actual": 0.122
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "ridge100",
+      "label": "Regularized (ridge 100)",
+      "settings": {
+        "ridge": 100.0,
+        "history_enabled": true,
+        "status": "Exploratory: comparisons reuse two hold-outs; not independent validation"
+      },
+      "validation": {
+        "helene_2024": {
+          "trained_without": "helene_2024",
+          "label": "Trained on Feb 2025 (ice + wind) only, then predicted Hurricane Helene (rain + wind)",
+          "predicted_damage": 933.4,
+          "actual_damage": 194,
+          "cell_rank_corr": 0.358,
+          "premise_auc": 0.59,
+          "predicted_customers_out": 89549,
+          "actual_customers_out": 21622,
+          "outage_cluster_size": 1.226,
+          "brier": 0.19172,
+          "baseline_brier": 0.08248,
+          "baseline_probability": 0.13209,
+          "total_customers": 244662,
+          "target_description": "Topology-derived customers downstream of recorded damage; not verified outage telemetry",
+          "reliability": {
+            "Elevated": {
+              "customers": 97224.0,
+              "predicted": 0.242,
+              "actual": 0.122
+            },
+            "High": {
+              "customers": 76650.0,
+              "predicted": 0.472,
+              "actual": 0.084
+            },
+            "Low": {
+              "customers": 32925.0,
+              "predicted": 0.099,
+              "actual": 0.026
+            },
+            "Severe": {
+              "customers": 37863.0,
+              "predicted": 0.702,
+              "actual": 0.065
+            }
+          }
+        },
+        "feb_2025_wind": {
+          "trained_without": "feb_2025_wind",
+          "label": "Trained on the Feb 2025 ice phase + Helene, then predicted the Feb 2025 wind phase",
+          "predicted_damage": 126.9,
+          "actual_damage": 184,
+          "cell_rank_corr": 0.38,
+          "premise_auc": 0.583,
+          "predicted_customers_out": 13298,
+          "actual_customers_out": 29995,
+          "outage_cluster_size": 1.448,
+          "brier": 0.11231,
+          "baseline_brier": 0.10763,
+          "baseline_probability": 0.11498,
+          "total_customers": 244662,
+          "target_description": "Topology-derived customers downstream of recorded damage; not verified outage telemetry",
+          "reliability": {
+            "Elevated": {
+              "customers": 3449.0,
+              "predicted": 0.192,
+              "actual": 0.11
+            },
+            "High": {
+              "customers": 806.0,
+              "predicted": 0.417,
+              "actual": 0.01
+            },
+            "Low": {
+              "customers": 240135.0,
+              "predicted": 0.05,
+              "actual": 0.122
+            },
+            "Severe": {
+              "customers": 272.0,
+              "predicted": 0.652,
+              "actual": 0.926
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "ridge1000",
+      "label": "Regularized (ridge 1000)",
+      "settings": {
+        "ridge": 1000.0,
+        "history_enabled": true,
+        "status": "Exploratory: comparisons reuse two hold-outs; not independent validation"
+      },
+      "validation": {
+        "helene_2024": {
+          "trained_without": "helene_2024",
+          "label": "Trained on Feb 2025 (ice + wind) only, then predicted Hurricane Helene (rain + wind)",
+          "predicted_damage": 1264.1,
+          "actual_damage": 194,
+          "cell_rank_corr": 0.367,
+          "premise_auc": 0.582,
+          "predicted_customers_out": 120048,
+          "actual_customers_out": 21622,
+          "outage_cluster_size": 1.226,
+          "brier": 0.28658,
+          "baseline_brier": 0.08248,
+          "baseline_probability": 0.13209,
+          "total_customers": 244662,
+          "target_description": "Topology-derived customers downstream of recorded damage; not verified outage telemetry",
+          "reliability": {
+            "Elevated": {
+              "customers": 66947.0,
+              "predicted": 0.272,
+              "actual": 0.028
+            },
+            "High": {
+              "customers": 78050.0,
+              "predicted": 0.473,
+              "actual": 0.14
+            },
+            "Low": {
+              "customers": 16641.0,
+              "predicted": 0.119,
+              "actual": 0.037
+            },
+            "Severe": {
+              "customers": 83024.0,
+              "predicted": 0.758,
+              "actual": 0.098
+            }
+          }
+        },
+        "feb_2025_wind": {
+          "trained_without": "feb_2025_wind",
+          "label": "Trained on the Feb 2025 ice phase + Helene, then predicted the Feb 2025 wind phase",
+          "predicted_damage": 333.1,
+          "actual_damage": 184,
+          "cell_rank_corr": 0.349,
+          "premise_auc": 0.577,
+          "predicted_customers_out": 37106,
+          "actual_customers_out": 29995,
+          "outage_cluster_size": 1.448,
+          "brier": 0.1136,
+          "baseline_brier": 0.10763,
+          "baseline_probability": 0.11498,
+          "total_customers": 244662,
+          "target_description": "Topology-derived customers downstream of recorded damage; not verified outage telemetry",
+          "reliability": {
+            "Elevated": {
+              "customers": 94864.0,
+              "predicted": 0.228,
+              "actual": 0.14
+            },
+            "High": {
+              "customers": 7339.0,
+              "predicted": 0.404,
+              "actual": 0.065
+            },
+            "Low": {
+              "customers": 142076.0,
+              "predicted": 0.086,
+              "actual": 0.113
+            },
+            "Severe": {
+              "customers": 383.0,
+              "predicted": 0.74,
+              "actual": 0.668
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "nohistory",
+      "label": "No spatial history (ridge 100)",
+      "settings": {
+        "ridge": 100.0,
+        "history_enabled": false,
+        "status": "Exploratory: comparisons reuse two hold-outs; not independent validation"
+      },
+      "validation": {
+        "helene_2024": {
+          "trained_without": "helene_2024",
+          "label": "Trained on Feb 2025 (ice + wind) only, then predicted Hurricane Helene (rain + wind)",
+          "predicted_damage": 767.1,
+          "actual_damage": 194,
+          "cell_rank_corr": 0.357,
+          "premise_auc": 0.586,
+          "predicted_customers_out": 86117,
+          "actual_customers_out": 21622,
+          "outage_cluster_size": 1.226,
+          "brier": 0.18128,
+          "baseline_brier": 0.08248,
+          "baseline_probability": 0.13209,
+          "total_customers": 244662,
+          "target_description": "Topology-derived customers downstream of recorded damage; not verified outage telemetry",
+          "reliability": {
+            "Elevated": {
+              "customers": 98267.0,
+              "predicted": 0.237,
+              "actual": 0.094
+            },
+            "High": {
+              "customers": 77934.0,
+              "predicted": 0.462,
+              "actual": 0.121
+            },
+            "Low": {
+              "customers": 34051.0,
+              "predicted": 0.101,
+              "actual": 0.024
+            },
+            "Severe": {
+              "customers": 34410.0,
+              "predicted": 0.679,
+              "actual": 0.063
+            }
+          }
+        },
+        "feb_2025_wind": {
+          "trained_without": "feb_2025_wind",
+          "label": "Trained on the Feb 2025 ice phase + Helene, then predicted the Feb 2025 wind phase",
+          "predicted_damage": 122.1,
+          "actual_damage": 184,
+          "cell_rank_corr": 0.341,
+          "premise_auc": 0.57,
+          "predicted_customers_out": 13311,
+          "actual_customers_out": 29995,
+          "outage_cluster_size": 1.448,
+          "brier": 0.11233,
+          "baseline_brier": 0.10763,
+          "baseline_probability": 0.11498,
+          "total_customers": 244662,
+          "target_description": "Topology-derived customers downstream of recorded damage; not verified outage telemetry",
+          "reliability": {
+            "Elevated": {
+              "customers": 3853.0,
+              "predicted": 0.198,
+              "actual": 0.036
+            },
+            "High": {
+              "customers": 482.0,
+              "predicted": 0.435,
+              "actual": 0.407
+            },
+            "Low": {
+              "customers": 240264.0,
+              "predicted": 0.051,
+              "actual": 0.123
+            },
+            "Severe": {
+              "customers": 63.0,
+              "predicted": 0.648,
+              "actual": 0.921
+            }
+          }
+        }
+      }
+    }
+  ],
+  "conclusion": "Regularization reduces the largest overprediction, but all tested candidates still have worse Brier scores than the training-only constant baseline on both events. Ranking also weakens. No candidate has been promoted; reusing these hold-outs for model choices makes this exploratory evidence, not independent validation.",
+  "next_steps": [
+    "Obtain verified outage start/end telemetry and unaffected-premise labels; downstream-of-damage labels are only a proxy.",
+    "Add independent storms across seasons and hazards, then reserve entire events for final evaluation.",
+    "Align damage occurrence times with weather; report dates may lag the physical failure.",
+    "Build historical features only from information available before the event for chronological validation.",
+    "Fit probability calibration only on separate training/calibration events and compare Brier scores, counts, ranking, and reliability on untouched storms.",
+    "Evaluate duration intervals separately against real restoration timestamps; a probability improvement does not validate repair times."
+  ]
+}

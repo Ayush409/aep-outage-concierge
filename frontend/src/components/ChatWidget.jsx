@@ -21,7 +21,7 @@ const OPS_SUGGESTIONS = [
 /** "Ask the Concierge" (customers, grounded on their own outage data) or the "Operations Copilot" (AEP, grounded on
  *  the system-wide model results) for the selected forecast / storm. */
 export default function ChatWidget({ aep = false }) {
-  const { scenario, scenarios } = useApp();
+  const { scenario, scenarios, customerParams } = useApp();
   const [open, setOpen] = useState(false);
   const [threads, setThreads] = useState({}); // one conversation per forecast / storm
   const [text, setText] = useState("");
@@ -43,7 +43,7 @@ export default function ChatWidget({ aep = false }) {
     setText("");
     setBusy(true);
     try {
-      const r = await api(aep ? "/api/aep/chat" : "/api/me/chat", { method: "POST", body: { scenario, messages: next } });
+      const r = await api(aep ? "/api/aep/chat" : "/api/me/chat", { method: "POST", body: { scenario, messages: next, access_mult: aep ? 1 : customerParams.access_mult } });
       setThreads((t) => ({ ...t, [scenario]: [...next, { role: "assistant", content: r.reply, source: r.source }] }));
     } catch (e) {
       setThreads((t) => ({ ...t, [scenario]: [...next, { role: "assistant", content: `Sorry - ${e.message}`, error: true }] }));

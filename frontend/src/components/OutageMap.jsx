@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { PolygonLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
-import { BAND_RGB, fmt, qs } from "../api.js";
+import { BAND_RGB, fmt, hourLabel, qs } from "../api.js";
 import { useApp } from "../App.jsx";
 import MapView, { squarePolygon } from "./MapView.jsx";
+import { mapTimes, restorationHour } from "./timeline.js";
+import RestorationSummary from "./RestorationSummary.jsx";
 import { compassName, LAYERS, nowIndex, sample, weatherLayer } from "./weather.js";
 import { Band, BandLegend, bandOutcomeText, Stat, TimeSlider, WeatherControls, useFetch } from "./ui.jsx";
 
@@ -14,38 +16,37 @@ const FAC = { hospital: [208, 59, 59], fire: [235, 104, 52], ems: [98, 80, 214] 
  * % by circuit and expected-damage details. Customer only: their own home and risk band.
  */
 export default function OutageMap({ aep = false }) {
-  const { scenario } = useApp();
-  const q = qs({ scenario });
-  const weather = useFetch(`/api/weather${q}`, [scenario]).data;
+  const { scenario, customerParams, customerRevision } = useApp();
+  const q = qs(aep ? { scenario } : customerParams);
+  const weather = useFetch(`/api/weather${qs({ scenario })}`, [scenario]).data;
   const cells = useFetch(`/api/sim/cells${q}`, [scenario]).data;
   const frames = useFetch(`/api/sim/frames${q}`, [scenario]).data;
   const overview = useFetch(`/api/sim/overview${q}`, [scenario]).data;
-  const status = useFetch(aep ? null : `/api/me/status${q}`, [scenario]).data;
+  const status = useFetch(aep ? null : `/api/me/status${q}`, [scenario, customerParams.access_mult, customerRevision]).data;
   const pins = useFetch(aep ? `/api/aep/pins${q}` : null, [scenario]).data;
   const fac = useFetch(aep ? "/api/aep/facilities" : null).data;
   const [layer, setLayer] = useState(aep ? null : "wind_gusts_10m");
   const [hour, setHour] = useState(0); // hours since the start of the window (= outage frame index)
   const [show, setShow] = useState({ risk: true, out: true, pins: true, fac: true });
 
-  // One hourly timeline for everything over the weather window: the map / cards / tables read the same frame, and
-  // weather shows its nearest time step.
+  // Scenarios follow restoration frames; live mode retains the forecast window.
   const wxStep = weather && weather.time.length > 1 ? (new Date(weather.time[1]) - new Date(weather.time[0])) / 3.6e6 : 1;
   const nWx = weather?.time.length || 0;
   const times = useMemo(() => {
     if (!weather) return null;
-    const t0 = new Date(weather.time[0]).getTime();
-    const n = Math.round((nWx - 1) * wxStep) + 1;
-    return Array.from({ length: n }, (_, i) => new Date(t0 + i * 3.6e6).toISOString());
-  }, [weather, frames, nWx, wxStep]);
+    return mapTimes(weather.time, frames, scenario === "live");
+  }, [weather, frames, scenario]);
   const evHour = Math.min(hour, Math.max((frames?.hours?.length || 1) - 1, 0));
   const wxIdx = Math.min(Math.floor(hour / wxStep), Math.max(nWx - 1, 0));
+  const weatherAvailable = hour <= Math.round((nWx - 1) * wxStep);
+  const restoredHour = restorationHour(frames?.total);
 
   // totals include small areas the map hides for privacy, so cards = ZIP / circuit table sums
   const frameTotal = (h) => frames?.total?.[h] ?? 0;
   const peak = useMemo(() => {
     if (!frames?.cells?.length) return null;
     let best = { h: 0, total: 0 };
-    const end = Math.min(frames.hours.length, Math.round((nWx - 1) * wxStep) + 1); // peak within the slider
+    const end = frames.hours.length;
     for (let h = 0; h < end; h++) {
       const total = frameTotal(h);
       if (total > best.total) best = { h, total };
@@ -58,7 +59,7 @@ export default function OutageMap({ aep = false }) {
   useEffect(() => {
     if (!weather || !times) return;
     if (scenario === "live") setHour(nowIndex({ time: times }));
-    else if (peak) setHour(peak.h);
+    else setHour(peak?.h ?? 0);
   }, [weather, times, scenario, peak]);
 
   const [areaHour, setAreaHour] = useState(null);
@@ -67,7 +68,7 @@ export default function OutageMap({ aep = false }) {
     return () => clearTimeout(t);
   }, [evHour]);
   const areas = useFetch(areaHour == null ? null
-    : `${aep ? "/api/aep/areas" : "/api/sim/areas"}${qs({ scenario, hour: areaHour })}`, [scenario, areaHour]).data;
+    : `${aep ? "/api/aep/areas" : "/api/sim/areas"}${qs({ ...(aep ? { scenario } : customerParams), hour: areaHour })}`, [scenario, areaHour, q]).data;
 
   const outCells = useMemo(() => {
     if (!frames?.cells?.length) return [];
@@ -85,7 +86,7 @@ export default function OutageMap({ aep = false }) {
       getFillColor: (d) => [...BAND_RGB[d.band], d.band === "Low" ? 0 : 50],
       getLineColor: (d) => [...BAND_RGB[d.band], d.band === "Low" ? 0 : 150], lineWidthMinPixels: 1,
     }),
-    weatherLayer(weather, layer, wxIdx, !!layer),
+    weatherLayer(weather, layer, wxIdx, !!layer && weatherAvailable),
     show.out && new ScatterplotLayer({
       id: "out", data: outCells, getPosition: (d) => [d.lon, d.lat], radiusUnits: "pixels",
       getRadius: (d) => 9 + Math.sqrt(d.out) * 0.9, getFillColor: [200, 16, 46, 210], stroked: true,
@@ -113,7 +114,7 @@ export default function OutageMap({ aep = false }) {
   ];
 
   function wxLine(coordinate) {
-    if (!weather || !layer || !coordinate) return "";
+    if (!weather || !layer || !coordinate || !weatherAvailable) return "";
     const [lon, lat] = coordinate;
     const v = Math.round(sample(weather, layer, wxIdx, lon, lat));
     const dir = LAYERS[layer].kind === "wind"
@@ -131,7 +132,7 @@ export default function OutageMap({ aep = false }) {
     }
     if (l?.id === "fac" && object) return tip(`<b>${object.name}</b><br/>${object.kind.toUpperCase()}`);
     if (l?.id === "risk" && object) {
-      const seen = bandOutcomeText(object.observed);
+      const seen = aep ? bandOutcomeText(object.observed) : "Experimental planning indicator; not a validated probability.";
       const detail = aep ? `<br/>${fmt.pct(object.p_out)} of ${fmt.n(object.customers)} customers - expected damage ` +
         `${object.exp_damage}<br/>Gust ${object.gust} mph, ice ${object.ice} in` : "";
       return tip(`<b>${object.band} risk</b>${seen ? `<br/><span class="muted">${seen}</span>` : ""}${detail}<br/>` +
@@ -161,11 +162,19 @@ export default function OutageMap({ aep = false }) {
               sub={s ? `of ${fmt.n(s.total_customers)} - range ${fmt.n(s.customers_out.p10)}-${fmt.n(s.customers_out.p90)}`
                 : ""} />
           </div>
-          {times && <TimeSlider times={times} hour={evHour} setHour={setHour} />}
+          {times?.length > 0 && <TimeSlider times={times} hour={Math.min(hour, times.length - 1)} setHour={setHour} />}
           {peak && <button className="chip" onClick={() => setHour(peak.h)}>Jump to peak outage
             ({fmt.n(peak.total)} customers)</button>}
+          {restoredHour !== null && <button className="chip" onClick={() => setHour(restoredHour)}>
+            Jump to all customers restored</button>}
+          {!aep && status && <RestorationSummary status={status} compact />}
+          {aep && frames?.all_restored_hour != null && <div className="small">
+            <b>All modeled customers restored:</b> {hourLabel(frames.start, frames.all_restored_hour)} (map run)
+          </div>}
+          {!weatherAvailable && <div className="small secondary">Restoration continues beyond the weather window. Weather overlays are unavailable for this time.</div>}
+          <details open={aep}><summary>Weather layers &amp; map options</summary>
           <WeatherControls layer={layer} setLayer={setLayer} legendWeather={weather} legendHour={wxIdx} />
-          {weather && layer && !aep && status?.home && (
+          {weather && weatherAvailable && layer && !aep && status?.home && (
             <div className="small secondary">At your home: <b>{Math.round(sample(weather, layer, wxIdx, status.home.lon,
               status.home.lat))} {LAYERS[layer].unit}</b></div>)}
           <div className="small stack">
@@ -173,15 +182,16 @@ export default function OutageMap({ aep = false }) {
               <label key={k} className="check"><input type="checkbox" checked={show[k]}
                 onChange={(e) => setShow({ ...show, [k]: e.target.checked })} /><span>{label}</span></label>
             ))}
-            {show.risk && <BandLegend />}
+            {show.risk && (aep ? <BandLegend /> : <div className="muted">Risk colors are experimental planning indicators, not measured outage probabilities.</div>)}
             {!aep && <div className="muted">Predicted from {scenario === "live" ? "the forecast" : "the simulation"}. Outages
               are shown by area (5+ customers), never by home. The blue dot is your home.</div>}
           </div>
+          </details>
         </div>
         <div className="map-panel tr stack" style={{ width: 300, maxHeight: "calc(100% - 60px)", overflow: "auto" }}>
           <h3 style={{ margin: 0 }}>% without power</h3>
-          <div className="small muted">At this time on the slider (typical simulated run, same as the map). AEP
-            customers in this data set; areas under 5 customers hidden.</div>
+          <div className="small muted">{aep ? "At this time on the slider (typical simulated run, same as the map). AEP customers in this data set; areas under 5 customers hidden."
+            : "Estimated outages at the selected time. Areas with fewer than 5 customers are hidden."}</div>
           <AreaTable title="ZIP code" rows={areas?.zip} highlight={!aep ? status?.premise?.zip : null} />
           {aep && <AreaTable title="Circuit" rows={areas?.circuit} />}
         </div>

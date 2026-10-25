@@ -7,6 +7,7 @@ import secrets
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
@@ -16,7 +17,7 @@ from pydantic import BaseModel, Field
 
 EMAIL = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 
-from . import ai, db, geocode, guidance
+from . import ai, db, experience, geocode, guidance
 from .config import DEV_MODE, SESSION_HOURS, TWILIO_FROM, TWILIO_SID, TWILIO_TOKEN
 from .engines import risk, simulate, views
 from .engines.data import PROCESSED, grid
@@ -115,6 +116,8 @@ def _cause_text(lc: dict | None) -> tuple[str | None, str | None]:
 
 def customer_view(res: dict, pidx: int, needs: list[str], prefs: dict | None = None) -> dict:
     st = views.premise_status(res, pidx)
+    st["confidence"] = dict(level="Limited", notes=[experience.LIMITATION] + st["confidence"]["notes"])
+    st["risk"]["observed"] = None  # saved band calibration is not informative enough for customer probabilities
     sc = res["scenario"]
     cause, fixed = _cause_text(st["likely_cause"])
     est = st["restoration"]
@@ -147,7 +150,48 @@ def customer_view(res: dict, pidx: int, needs: list[str], prefs: dict | None = N
     prep = guidance.preparation(st["risk"]["band"], hazard if "rules" not in sc else sc["rules"][0],
                                 est["p50"] if est else None, st["risk"]["weather"], needs, st["premise"]["service"])
     return dict(**st, factors_plain=factors[:5], cause_plain=cause, fixed_plain=fixed, delay_reason=delay,
-                communications=comms, alerts=elig, preparation=prep)
+                communications=comms, alerts=elig, preparation=prep, generated_at=time.time())
+
+
+DEMO_HOUSEHOLDS = {
+    "overhead": "Overhead-service household",
+    "underground": "Underground-service household",
+    "medical": "Household with a declared medical-device need",
+}
+
+
+@app.get("/api/demo/households")
+def demo_households():
+    return dict(enabled=DEV_MODE, households=[dict(id=k, label=v) for k, v in DEMO_HOUSEHOLDS.items()] if DEV_MODE else [])
+
+
+class DemoLogin(BaseModel):
+    household: Literal["overhead", "underground", "medical"]
+
+
+@app.post("/api/auth/demo")
+def demo_login(body: DemoLogin, resp: Response):
+    if not DEV_MODE:
+        raise HTTPException(404)
+    g = grid()
+    res = sim(params(scenario="snow_storm"))
+    candidates = np.flatnonzero((g.prem.service_kind == ("Underground" if body.household == "underground" else "Overhead")).to_numpy())
+    if not len(candidates):
+        raise HTTPException(503, "Demo household data is unavailable")
+    # Prefer an affected anonymous premise for a complete demonstration.
+    pidx = int(candidates[np.argmax(res["p_out"][candidates])])
+    pr = g.prem.iloc[pidx]
+    needs = ["medical_device"] if body.household == "medical" else []
+    with db.tx() as con:
+        cur = con.execute("INSERT INTO users(email,name,pw_hash,role,created,is_demo) VALUES (?,?,?,'customer',?,1)",
+                          (f"{secrets.token_hex(12)}@anonymous.demo.invalid", DEMO_HOUSEHOLDS[body.household],
+                           hash_password(secrets.token_urlsafe(32)), time.time()))
+        uid = cur.lastrowid
+        con.execute("INSERT INTO customer_profiles(user_id,premise,address_enc,zip_enc,needs_enc,alerts_sms,alerts_inapp) "
+                    "VALUES (?,?,?,?,?,0,1)",
+                    (uid, pr.premise, encrypt("Anonymous demo home"), encrypt(str(pr.zip)), encrypt(json.dumps(needs))))
+    _set_cookie(resp, make_session(uid, "customer"))
+    return dict(ok=True, scenario="snow_storm")
 
 
 # ------------------------------------------------------------------ auth
@@ -298,8 +342,7 @@ def sim_areas(hour: float | None = None, p: simulate.Params = Depends(params), u
 def sim_frames(p: simulate.Params = Depends(params), user=Depends(current_user)):
     fr = views.frames(sim(p), step=1)
     if user["role"] != "aep":
-        fr["damage"] = [dict(t=d["t"], done=d["done"], lon=round(d["lon"], 3), lat=round(d["lat"], 3), type=d["type"])
-                        for d in fr["damage"]]  # ~100 m precision for customers (equipment, not homes)
+        fr["damage"] = []  # customers use aggregated outage areas, never equipment coordinates
     return fr
 
 
@@ -314,12 +357,96 @@ def my_status(p: simulate.Params = Depends(params), user=Depends(require_custome
     pr = grid().prem.iloc[pidx]
     out["home"] = dict(lon=round(float(pr.lon), 4), lat=round(float(pr.lat), 4))  # own premise only
     out["address"] = decrypt(prof["address_enc"])  # the customer's own address, shown only to them
+    out["journey"] = journey_state(p.scenario, user)
+    with db.tx() as con:
+        completed = {r[0] for r in con.execute("SELECT task_key FROM preparation_checks WHERE user_id=? AND scenario=?",
+                                             (user["id"], p.scenario))}
+    out["checklist"] = experience.checklist(out["preparation"], completed)
     return out
+
+
+@app.get("/api/me/journey")
+def journey_state(scenario: str = "live", user=Depends(require_customer)):
+    if scenario not in SCENARIOS:
+        raise HTTPException(404, "Unknown scenario")
+    with db.tx() as con:
+        row = con.execute("SELECT * FROM customer_journeys WHERE user_id=? AND scenario=?", (user["id"], scenario)).fetchone()
+    if not row:
+        return dict(stage=-1, access_mult=1.0, change=None, updated=None)
+    return dict(stage=row["stage"], access_mult=row["access_mult"],
+                change=json.loads(row["change_json"]) if row["change_json"] else None, updated=row["updated"])
+
+
+class JourneyAction(BaseModel):
+    scenario: str
+    action: Literal["start", "outage", "update", "restore", "restart"]
+    access_mult: float = Field(default=1.0, ge=0.5, le=2.5)
+
+
+@app.post("/api/me/journey")
+def advance_journey(body: JourneyAction, user=Depends(require_customer)):
+    if body.scenario not in SCENARIOS or SCENARIOS[body.scenario]["kind"] == "live":
+        raise HTTPException(422, "Choose a storm simulation for the practice walkthrough")
+    prof = _profile(user["id"])
+    stage = {"start": 0, "outage": 1, "update": 2, "restore": 3, "restart": 0}[body.action]
+    with db.tx() as con:
+        old = con.execute("SELECT * FROM customer_journeys WHERE user_id=? AND scenario=?", (user["id"], body.scenario)).fetchone()
+    current = old["stage"] if old else -1
+    if body.action != "restart" and not experience.stage_allowed(current, stage):
+        raise HTTPException(409, "Advance the walkthrough one stage at a time")
+    old_access = old["access_mult"] if old else 1.0
+    access = body.access_mult if stage == 2 else (1.0 if stage == 0 else old_access)
+    p = params(scenario=body.scenario, access_mult=access)
+    status = views.premise_status(sim(p), _premise_idx(prof["premise"]))
+    snap = experience.snapshot(status)
+    change = experience.changes(json.loads(old["snapshot"]), snap, old_access, access) if stage == 2 else None
+    stamp = time.time()
+    with db.tx() as con:
+        con.execute("BEGIN IMMEDIATE")
+        latest = con.execute("SELECT updated FROM customer_journeys WHERE user_id=? AND scenario=?", (user["id"], body.scenario)).fetchone()
+        if (latest[0] if latest else None) != (old["updated"] if old else None):
+            raise HTTPException(409, "Walkthrough changed; refresh and try again")
+        run_id = secrets.token_hex(8) if stage == 0 else old["run_id"]
+        change_json = json.dumps(change) if change else (old["change_json"] if old and stage != 0 else None)
+        con.execute("INSERT INTO customer_journeys VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id,scenario) DO UPDATE SET "
+                    "run_id=excluded.run_id,stage=excluded.stage,access_mult=excluded.access_mult,snapshot=excluded.snapshot,"
+                    "change_json=excluded.change_json,updated=excluded.updated",
+                    (user["id"], body.scenario, run_id, stage, access, json.dumps(snap), change_json, stamp))
+        eligible = guidance.alert_eligibility(status["risk"]["band"], db.get_setting("customer_alert_threshold"),
+                    prof["needs"], db.get_setting("life_support_one_band_lower") == "1", False, True, False)["eligible"]
+        should_notify = (stage != 0 or eligible) and (stage != 2 or change["changed"])
+        if stage in (1, 3) and not status["event"]["timeline"]:
+            should_notify = False
+        if prof["alerts_inapp"] and should_notify:
+            con.execute("INSERT INTO notifications(user_id,scenario,kind,band,channel,title,body,created) VALUES (?,?,?,?,?,?,?,?)",
+                        (user["id"], body.scenario, experience.STAGES[stage], status["risk"]["band"], "in-app",
+                         "Practice: " + experience.TITLES[stage], experience.practice_message(stage, status, change), stamp))
+    return journey_state(body.scenario, user)
+
+
+class ChecklistUpdate(BaseModel):
+    scenario: str
+    task_key: str = Field(pattern=r"^[a-f0-9]{24}$")
+    done: bool
+
+
+@app.put("/api/me/checklist")
+def update_checklist(body: ChecklistUpdate, user=Depends(require_customer)):
+    if body.scenario not in SCENARIOS:
+        raise HTTPException(404, "Unknown scenario")
+    with db.tx() as con:
+        if body.done:
+            con.execute("INSERT OR IGNORE INTO preparation_checks VALUES (?,?,?)", (user["id"], body.scenario, body.task_key))
+        else:
+            con.execute("DELETE FROM preparation_checks WHERE user_id=? AND scenario=? AND task_key=?",
+                        (user["id"], body.scenario, body.task_key))
+    return dict(ok=True)
 
 
 class ChatBody(BaseModel):
     messages: list[dict] = Field(max_length=40)
     scenario: str | None = None
+    access_mult: float = Field(default=1.0, ge=0.5, le=2.5)
 
 
 def _when(start: str, hours: float | None) -> str | None:
@@ -332,7 +459,7 @@ def _when(start: str, hours: float | None) -> str | None:
 @app.post("/api/me/chat")
 def my_chat(body: ChatBody, user=Depends(require_customer)):
     """Ask the Concierge: Claude answers from this customer's own model results (no name, address or phone)."""
-    p = params(scenario=body.scenario)
+    p = params(scenario=body.scenario, access_mult=body.access_mult)
     prof = _profile(user["id"])
     res = sim(p)
     v = customer_view(res, _premise_idx(prof["premise"]), prof["needs"],
@@ -484,6 +611,8 @@ def export_me(user=Depends(require_customer)):
         data["notifications"] = [dict(r) for r in con.execute(
             "SELECT scenario, kind, channel, title, body, created FROM notifications WHERE user_id = ?",
             (user["id"],)).fetchall()]
+        data["preparation_checks"] = [dict(r) for r in con.execute("SELECT scenario,task_key FROM preparation_checks WHERE user_id=?", (user["id"],))]
+        data["practice_journeys"] = [dict(r) for r in con.execute("SELECT scenario,stage,access_mult,snapshot,change_json,updated FROM customer_journeys WHERE user_id=?", (user["id"],))]
     return JSONResponse(data, headers={"Content-Disposition": "attachment; filename=my-aep-data.json"})
 
 
@@ -707,56 +836,74 @@ def _send_sms(phone: str, text: str) -> str:
 
 
 @app.post("/api/aep/alerts/send")
-def aep_send_alerts(p: simulate.Params = Depends(params), user=Depends(require_aep)):
-    """Evaluate every registered customer for the scenario and queue their messages."""
+def aep_send_alerts(kind: Literal["pre_storm", "outage_confirmed", "estimate_updated", "restored"] = "pre_storm",
+                    p: simulate.Params = Depends(params), user=Depends(require_aep)):
+    """One explicit stage per dispatch; retain history and suppress duplicate messages."""
+    if p.scenario == "live" and kind != "pre_storm":
+        raise HTTPException(409, "No confirmed utility-event feed is connected. Use a storm drill for outage stages.")
     res = sim(p)
-    sid = p.scenario
-    now = time.time()
-    sent, ops = 0, []
+    sent, skipped, ops = 0, 0, []
     with db.tx() as con:
-        con.execute("DELETE FROM notifications WHERE scenario = ?", (sid,))
-        custs = con.execute("SELECT u.id, c.* FROM users u JOIN customer_profiles c ON c.user_id = u.id").fetchall()
+        custs = con.execute("SELECT c.* FROM customer_profiles c").fetchall()
     for c in custs:
-        needs = json.loads(decrypt(c["needs_enc"]) or "[]") if c["needs_enc"] else []
-        phone = decrypt(c["phone_enc"]) if c["phone_verified"] else None  # texts only to verified numbers
-        prefs = dict(alerts_sms=c["alerts_sms"], alerts_inapp=c["alerts_inapp"], phone=phone)
-        v = customer_view(res, _premise_idx(c["premise"]), needs, prefs)
-        band = v["risk"]["band"]
-        msgs = v["communications"]["messages"]
-        kinds = ["pre_storm"] + (["outage_confirmed", "estimate_updated", "restored"] if v["restoration"] else [])
-        rows = []
-        for k in kinds:
-            title = dict(pre_storm="Storm alert", outage_confirmed="Outage confirmed",
-                         estimate_updated="Estimate updated", restored="Power restored")[k]
-            if v["alerts"]["eligible"] or k != "pre_storm":
-                for ch in v["alerts"]["channels"] or ["in-app"]:
-                    channel = _send_sms(phone, msgs[k]) if ch == "SMS" else "in-app"
-                    rows.append((c["user_id"], sid, k, band, channel, title, msgs[k], now, 0))
-        esc = []
-        if v["restoration"] and ("medical_device" in needs or "life_support" in needs):
-            esc.append(f"Customer with declared medical need expected out {v['restoration']['label']}")
-        if v["confidence"]["level"] == "Low" and band == "Severe":
-            esc.append("Low-confidence prediction in a Severe area - verify with field reports")
+        needs = json.loads(decrypt(c["needs_enc"]) or "[]")
+        status = views.premise_status(res, _premise_idx(c["premise"]))
+        snap = experience.snapshot(status)
+        phone = decrypt(c["phone_enc"]) if c["phone_verified"] else None
+        elig = guidance.alert_eligibility(status["risk"]["band"], db.get_setting("customer_alert_threshold"), needs,
+                db.get_setting("life_support_one_band_lower") == "1", bool(c["alerts_sms"]), bool(c["alerts_inapp"]), bool(phone))
         with db.tx() as con:
-            con.executemany("INSERT INTO notifications(user_id, scenario, kind, band, channel, title, body, created, "
-                            "escalation) VALUES (?,?,?,?,?,?,?,?,?)", rows)
-            for e in esc:
-                con.execute("INSERT INTO notifications(user_id, scenario, kind, band, channel, title, body, created, "
-                            "escalation) VALUES (NULL,?,?,?,?,?,?,?,1)",
-                            (sid, "escalation", band, "ops", "Escalation", e, now))
-        sent += len(rows)
-        ops += esc
-    # operations feed: AEP gets every band
-    s = res["summary"]
-    with db.tx() as con:
-        con.execute("INSERT INTO notifications(user_id, scenario, kind, band, channel, title, body, created) "
-                    "VALUES (NULL,?,?,?,?,?,?,?)",
-                    (sid, "ops_summary", None, "ops", f"{SCENARIOS[sid]['name']}: impact estimate",
-                     f"Expected customers out {s['expected_customers_out']:,} of {s['total_customers']:,}; "
-                     f"90% restored by hour {s['hours_to_90pct']['p50']:.0f} (P90 {s['hours_to_90pct']['p90']:.0f}). "
-                     f"Confidence {res['confidence']['level']}.", now))
-    db.audit(user["id"], "alerts_sent", dict(scenario=sid, messages=sent, escalations=len(ops)))
-    return dict(messages=sent, customers=len(custs), escalations=ops)
+            previous = con.execute("SELECT * FROM notification_dispatches WHERE user_id=? AND scenario=? ORDER BY created DESC LIMIT 1",
+                                   (c["user_id"], p.scenario)).fetchone()
+        if kind == "pre_storm" and not elig["eligible"]:
+            skipped += 1
+            continue
+        if kind != "pre_storm" and (not previous or not status["event"]["timeline"]):
+            skipped += 1
+            continue
+        if kind == "outage_confirmed" and previous["kind"] != "pre_storm":
+            skipped += 1
+            continue
+        if kind in ("estimate_updated", "restored") and previous["kind"] not in ("outage_confirmed", "estimate_updated"):
+            skipped += 1
+            continue
+        change = None
+        if kind == "estimate_updated":
+            old = json.loads(previous["snapshot"])
+            if old["status"] == snap:
+                skipped += 1
+                continue
+            change = experience.changes(old["status"], snap, old["access_mult"], p.access_mult)
+        channels = elig["channels"] if p.scenario == "live" else (["in-app"] if c["alerts_inapp"] else [])
+        if not channels:
+            skipped += 1
+            continue
+        fp = experience.fingerprint(dict(status=snap, params=p.__dict__))
+        saved = json.dumps(dict(status=snap, access_mult=p.access_mult))
+        with db.tx() as con:
+            claimed = con.execute("INSERT OR IGNORE INTO notification_dispatches VALUES (?,?,?,?,?,?)",
+                                  (c["user_id"], p.scenario, kind, fp, saved, time.time())).rowcount
+        if not claimed:
+            skipped += 1
+            continue
+        stage = experience.STAGES.index(kind)
+        text = experience.practice_message(stage, status, change) if p.scenario != "live" else (
+            f"Experimental storm outlook: {status['risk']['band']} planning indicator. Review your preparation plan. "
+            "This forecast does not confirm an outage.")
+        with db.tx() as con:
+            for ch in channels:
+                channel = _send_sms(phone, text) if ch == "SMS" else "in-app"
+                con.execute("INSERT INTO notifications(user_id,scenario,kind,band,channel,title,body,created) VALUES (?,?,?,?,?,?,?,?)",
+                            (c["user_id"], p.scenario, kind, status["risk"]["band"], channel,
+                             ("Practice: " if p.scenario != "live" else "") + experience.TITLES[stage], text, time.time()))
+                sent += 1
+            if kind == "outage_confirmed" and any(n in needs for n in ("medical_device", "life_support")):
+                escalation = "Practice escalation: a customer with a declared medical need has a modeled outage."
+                con.execute("INSERT INTO notifications(scenario,kind,channel,title,body,created,escalation) VALUES (?,?,?,?,?,?,1)",
+                            (p.scenario, "escalation", "ops", "Review declared need", escalation, time.time()))
+                ops.append(escalation)
+    db.audit(user["id"], "alerts_sent", dict(scenario=p.scenario, kind=kind, messages=sent, skipped=skipped))
+    return dict(messages=sent, customers=len(custs), escalations=ops, skipped=skipped)
 
 
 @app.get("/api/aep/notifications")
@@ -770,7 +917,13 @@ def aep_notifications(user=Depends(require_aep)):
 @app.get("/api/aep/model")
 def aep_model(user=Depends(require_aep)):
     m = risk.model().meta
+    import hashlib
+    review_path = ROOT / "docs" / "model_review.json"
+    review = json.loads(review_path.read_text()) if review_path.exists() else None
+    if review and review.get("active_model_sha256") != hashlib.sha256(risk.MODEL_PATH.read_bytes()).hexdigest():
+        review = None  # A retrained model must not inherit an older experiment report.
     return dict(features=[dict(name=n, label=l, coef=c) for n, l, c in zip(m["features"], m["labels"], m["coef"])],
+                review=review,
                 intercept=m["intercept"], validation=m["validation"], train_range=m["train_range"],
                 trained_on=m["trained_on"], damage_records=m["damage_records"],
                 training_storms=m.get("training_storms", []), hazard_behaviour=m.get("hazard_behaviour", {}),

@@ -42,7 +42,26 @@ Open http://localhost:5173. Demo logins (customers and AEP operators) are listed
 
 For a single-server build: `npm --prefix frontend run build`, then the API also serves the app on port 8000.
 
-## Layout
+## Customer demonstration
+
+With `DEV_MODE=1`, the login page offers anonymous overhead, underground, and medical-needs demo households.
+Each creates a separate synthetic customer account. In My Status, start the storm journey and advance through
+preparation, outage, a revised estimate, and restoration. The repair-access slider reruns the model;
+the comparison and map use the same assumptions. Results may change only slightly or remain unchanged.
+Practice alerts respect in-app preferences, preserve history, and never send SMS.
+
+The preparation checklist saves progress per household and scenario. The Ready Plan download is a self-contained
+HTML file for offline use, with its calculation time and a stale-information notice. Address and declared needs
+are excluded unless explicitly selected. Downloaded copies remain on the device after account deletion.
+
+Set `AI_ENABLED=0` in the backend environment to disable Claude calls and use template responses.
+This does not disable account/checklist storage. The underlying risk model remains experimental:
+its bands are planning indicators, not validated outage probabilities. No live utility-confirmation feed is connected.
+
+Checks: `python -m unittest discover -s tests` and
+`node --test frontend/src/components/timeline.test.js frontend/src/components/offlinePlan.test.js`.
+
+## Project layout
 
 | Path | What |
 |---|---|

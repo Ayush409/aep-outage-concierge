@@ -9,6 +9,8 @@ export default function Comms() {
   const [tick, setTick] = useState(0);
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [kind, setKind] = useState("pre_storm");
+  const [error, setError] = useState("");
   const feed = useFetch("/api/aep/notifications", [tick]).data;
   const customers = useFetch("/api/aep/customers").data;
   useEffect(() => { api("/api/aep/settings").then(setSettings); }, []);
@@ -19,9 +21,12 @@ export default function Comms() {
   }
   async function send() {
     setBusy(true);
+    setError("");
     try {
-      setResult(await api(`/api/aep/alerts/send${qs({ scenario })}`, { method: "POST" }));
+      setResult(await api(`/api/aep/alerts/send${qs({ scenario, kind })}`, { method: "POST" }));
       setTick(tick + 1);
+    } catch (e) {
+      setError(e.message);
     } finally {
       setBusy(false);
     }
@@ -49,8 +54,12 @@ export default function Comms() {
             : `Storm drill - ${scenarios.find((s) => s.id === scenario)?.name}`}</b> (change it in the top-right menu)</div>
           <button className="primary" onClick={send} disabled={busy}>
             {busy ? "Evaluating customers..." : "Evaluate customers and send alerts"}</button>
-          <div className="small muted">Customers always see the live forecast. Storm drills send practice alerts so you
-            can check wording, channels and escalations.</div>
+          <label className="field"><span>Stage to send</span><select value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="pre_storm">Before the storm</option><option value="outage_confirmed">Practice outage begins</option>
+            <option value="estimate_updated">Changed estimate only</option><option value="restored">Practice restoration</option>
+          </select></label>
+          <div className="small muted">One stage at a time. History is retained and duplicates are skipped. Storm drills stay in-app. Live outage confirmations require a utility feed, which is not connected.</div>
+          {error && <div role="alert" className="error">{error}</div>}
           {result && <div className="small" role="status">Queued {result.messages} messages for {result.customers} customers;
             {" "}{result.escalations.length} escalation(s).</div>}
         </section>
@@ -60,7 +69,7 @@ export default function Comms() {
             <li>A customer with a declared medical need is expected to be out</li>
             <li>A hospital's circuit is out (restoration priority boost)</li>
             <li>Low-confidence prediction in a Severe area - verify with field reports</li>
-            <li>Estimate slips by 2+ hours or 25% - customers get an "estimate updated" message</li>
+            <li>Review changes in restoration estimates before sending the update stage. Identical snapshots are skipped; this prototype does not monitor live estimate changes automatically.</li>
           </ul>
         </section>
       </div>

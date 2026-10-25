@@ -50,6 +50,23 @@ CREATE TABLE IF NOT EXISTS phone_codes (
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT NOT NULL, detail TEXT, ts REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS customer_journeys (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  scenario TEXT NOT NULL, run_id TEXT NOT NULL, stage INTEGER NOT NULL,
+  access_mult REAL NOT NULL DEFAULT 1, snapshot TEXT NOT NULL, change_json TEXT,
+  updated REAL NOT NULL, PRIMARY KEY (user_id, scenario)
+);
+CREATE TABLE IF NOT EXISTS preparation_checks (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  scenario TEXT NOT NULL, task_key TEXT NOT NULL,
+  PRIMARY KEY (user_id, scenario, task_key)
+);
+CREATE TABLE IF NOT EXISTS notification_dispatches (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  scenario TEXT NOT NULL, kind TEXT NOT NULL, fingerprint TEXT NOT NULL,
+  snapshot TEXT NOT NULL, created REAL NOT NULL,
+  PRIMARY KEY (user_id, scenario, kind, fingerprint)
+);
 """
 
 DEFAULT_SETTINGS = {
@@ -79,6 +96,9 @@ def tx():
 def init():
     with tx() as con:
         con.executescript(SCHEMA)
+        user_cols = {r["name"] for r in con.execute("PRAGMA table_info(users)")}
+        if "is_demo" not in user_cols:
+            con.execute("ALTER TABLE users ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0")
         cols = {r["name"] for r in con.execute("PRAGMA table_info(customer_profiles)")}
         if "phone_verified" not in cols:  # added after the first release
             con.execute("ALTER TABLE customer_profiles ADD COLUMN phone_verified INTEGER NOT NULL DEFAULT 0")

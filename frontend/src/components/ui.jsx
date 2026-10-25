@@ -14,7 +14,7 @@ export function Band({ band, big }) {
 /** "In N past storms, about X% of homes in this band lost power" - what the band has meant in practice. */
 export function bandOutcomeText(o) {
   if (!o) return null;
-  return `In ${o.storms} past storm${o.storms === 1 ? "" : "s"}, about ${fmt.pct(o.share)} of homes in this band lost power`;
+  return `Exploratory pooled topology proxy from ${o.storms} hold-out event(s): ${fmt.pct(o.share)}. Not a validated outage probability.`;
 }
 
 export function BandLegend() {
@@ -25,11 +25,11 @@ export function BandLegend() {
         {BANDS.map((b) => (
           <span key={b} className="row" style={{ gap: 4 }} title={bandOutcomeText(bandOutcomes?.[b]) || undefined}>
             <i style={{ width: 10, height: 10, borderRadius: 3, background: BAND_COLOR[b], display: "inline-block" }} />
-            {b} {bandOutcomes?.[b] && <span className="muted">~{fmt.pct(bandOutcomes[b].share)}</span>}
+            {b}
           </span>
         ))}
       </div>
-      <div className="small muted">% = homes in that band that lost power in past storms</div>
+      <div className="small muted">Experimental planning bands. Hold-out tests do not validate them as outage probabilities.</div>
     </div>
   );
 }
@@ -162,7 +162,8 @@ export function TimeSlider({ times, hour, setHour }) {
   const live = now >= ms[0] && now <= ms[n - 1] + 3.6e6;
   const nowIdx = live ? Math.max(0, ms.findIndex((t) => t > now) - 1) : null;
   const pct = (i) => `${(100 * i) / Math.max(n - 1, 1)}%`;
-  const days = ms.map((t, i) => [t, i]).filter(([t]) => new Date(t).getHours() === 0);
+  const allDays = ms.map((t, i) => [t, i]).filter(([t]) => new Date(t).getHours() === 0);
+  const days = allDays.filter((_, i) => i % Math.max(1, Math.ceil(allDays.length / 4)) === 0);
   const sel = new Date(ms[hour]);
   return (
     <div className="stack" style={{ gap: 4 }}>
@@ -182,17 +183,21 @@ export function TimeSlider({ times, hour, setHour }) {
               background: "var(--band-severe)", transform: "translateX(-1px)" }} />
           </>
         )}
-        <input type="range" min={0} max={n - 1} value={hour} onChange={(e) => setHour(+e.target.value)}
-          aria-label="Forecast hour" style={{ position: "relative", width: "100%" }} />
+        <input className="time-range" type="range" min={0} max={n - 1} step={1} value={hour} onChange={(e) => setHour(+e.target.value)}
+          aria-label="Map timeline hour" aria-valuetext={sel.toLocaleString()} style={{ position: "relative", width: "100%" }} />
         <div aria-hidden="true" style={{ position: "relative", height: 14 }} className="small muted">
           {days.map(([t, i]) => (
-            <span key={i} style={{ position: "absolute", left: pct(i), transform: "translateX(-50%)", whiteSpace: "nowrap",
+            <span key={i} style={{ position: "absolute", left: pct(i), transform: i < n * .1 ? "none" : i > n * .9 ? "translateX(-100%)" : "translateX(-50%)", whiteSpace: "nowrap",
               fontSize: 11 }}>
               <span style={{ display: "block", width: 1, height: 4, background: "var(--text-muted)", margin: "0 auto" }} />
-              {new Date(t).toLocaleDateString(undefined, { weekday: "short" })}
+              {new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
             </span>
           ))}
         </div>
+      </div>
+      <div className="row spread small muted">
+        <span>{new Date(ms[0]).toLocaleDateString()}</span>
+        <span>{new Date(ms[n - 1]).toLocaleDateString()}</span>
       </div>
       {live && (
         <div className="row spread small">

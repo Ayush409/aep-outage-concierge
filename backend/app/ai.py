@@ -12,13 +12,15 @@ from functools import lru_cache
 
 import anthropic
 
-from .config import ANTHROPIC_MODEL
+from .config import AI_ENABLED, ANTHROPIC_MODEL
+from .experience import LIMITATION
 from .guidance import template_messages
 
 log = logging.getLogger("ai")
 
 SYSTEM = """You write outage communications for AEP customers during storms.
 Rules:
+- Risk bands are experimental planning indicators, not validated probabilities. Never infer that an outage is likely or certain from a band alone.
 - Use ONLY the facts in the JSON you are given. Never invent numbers, times, places, or causes.
 - Plain language a 12-year-old understands. Short sentences. No jargon (say "the fuse that protects your street", not "lateral fuse").
 - Always keep model estimates clearly labelled as estimates, separate from confirmed facts.
@@ -50,6 +52,8 @@ SCHEMA = {
 
 @lru_cache(maxsize=1)
 def _client():
+    if not AI_ENABLED:
+        raise RuntimeError("AI disabled; use local templates")
     return anthropic.Anthropic(max_retries=1, timeout=60.0)
 
 
@@ -137,7 +141,7 @@ def _generate_prep(ctx_json: str) -> str:
     resp = _client().beta.messages.create(
         model=ANTHROPIC_MODEL,
         max_tokens=4000,
-        system=PREP_SYSTEM,
+        system=PREP_SYSTEM + "\n" + LIMITATION + " Never equate a risk band with an outage being likely or certain.",
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
         output_config={"effort": "low", "format": {"type": "json_schema", "schema": PREP_SCHEMA}},
@@ -157,10 +161,10 @@ def _fallback_prep(ctx: dict) -> dict:
         sections.append(dict(title="If your power goes out", items=tips["if_out"][:n_out]))
     if tips["your_needs"]:
         sections.append(dict(title="For the needs you told us about", items=tips["your_needs"]))
-    headline = {"Low": "No action needed right now - just the basics.",
+    headline = {"Low": "Keep your essentials ready.",
                 "Elevated": "A few simple steps will help if the power goes out.",
-                "High": "Get ready now - an outage is likely.",
-                "Severe": "Prepare now - an outage is very likely and may be long."}.get(band, "Be prepared.")
+                "High": "Review your storm plan and essential supplies.",
+                "Severe": "Prepare for a possible extended outage."}.get(band, "Be prepared.")
     intro = f"Your risk band is {band}."
     if ctx.get("estimate_label"):
         intro += f" If your power goes out, restoration is {ctx['estimate_label']} (a model estimate)."
@@ -293,7 +297,7 @@ def chat(facts: dict, history: list[dict], ops: bool = False) -> dict:
         resp = _client().beta.messages.create(
             model=ANTHROPIC_MODEL,
             max_tokens=2000,
-            system=(OPS_CHAT_SYSTEM if ops else CHAT_SYSTEM) + "\nFACTS (JSON):\n" + json.dumps(facts, sort_keys=True, default=str),
+            system=(OPS_CHAT_SYSTEM if ops else CHAT_SYSTEM + "\n" + LIMITATION) + "\nFACTS (JSON):\n" + json.dumps(facts, sort_keys=True, default=str),
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
             output_config={"effort": "low"},

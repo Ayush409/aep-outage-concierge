@@ -86,11 +86,15 @@ def frames(res: dict, step: int = 1) -> dict:
     """Customers out per cell per hour (median run) + damage events, for the 3D replay."""
     g = grid()
     med = res["median"]
-    H = res["weather_hours"] + 72
     if med is None:
         return dict(hours=[], cells=[], out=[], damage=[])
     out, st, rest = med["out"], med["st"], med["rest"]
-    H = min(max(H, int(np.ceil(rest.max())) + 6), len(res["time"]))
+    restored_hour = int(np.ceil(rest.max())) if out.any() else None
+    # A scenario ends just after the final customer is restored. Live forecasts
+    # still include the whole weather window, even when repairs finish earlier.
+    H = restored_hour + step + 1 if restored_hour is not None else res["weather_hours"]
+    if res["scenario"]["kind"] == "live":
+        H = max(H, res["weather_hours"])
     ncell = len(g.cells)
     m = np.zeros((ncell, H + 1))
     idx = np.nonzero(out)[0]
@@ -103,6 +107,7 @@ def frames(res: dict, step: int = 1) -> dict:
     dmg = [dict(t=_r(t), done=_r(f), lon=_r(a.lon.iloc[i], 4), lat=_r(a.lat.iloc[i], 4), type=a.asset_type.iloc[i])
            for i, t, f in zip(med["idx"], med["when"], med["finish"])]
     return dict(hours=list(range(0, H, step)), start=res["time"][0], weather_hours=res["weather_hours"],
+                all_restored_hour=restored_hour,
                 customers_out=int(cust[idx].sum()),  # this run's total (the cards match the map)
                 total=m.sum(axis=0).round().astype(int).tolist(),  # everyone out each hour, incl. hidden small areas
                 cells=[dict(cell=int(g.cells.index[k]), lon=_r(g.cells.lon.iloc[k], 4), lat=_r(g.cells.lat.iloc[k], 4))
@@ -220,25 +225,27 @@ def premise_status(res: dict, pidx: int) -> dict:
                          f"could be up to {hours_label(np.percentile(dur, 90))}",
                    outage_start=_r(np.median(starts)), restored=_r(np.median(ends)))
 
-    # what this event does: share of homes in the customer's ZIP that lose power (averaged over runs), and a
-    # representative run for this home (median outage length among runs where it lost power)
+    # Risk and duration ranges summarize all runs. Playback timestamps come from
+    # the SAME representative run as frames(), including homes that stay on.
     cust = g.prem_customers
     in_zip = (g.prem.zip == pr.zip).to_numpy()
     zip_total = max(float(cust[in_zip].sum()), 1.0)
     area_share = float(np.mean([cust[r["out"] & in_zip].sum() / zip_total for r in runs])) if runs else 0.0
     timeline = None
-    if starts:
-        out_runs = [r for r, o in zip(runs, outs) if o]
-        dur = np.array(ends) - np.array(starts)
-        k = int(np.argsort(dur)[len(dur) // 2])
-        lost, back = starts[k], ends[k]
+    med = res["median"]
+    all_restored_hour = None
+    if med is not None and med["out"].any():
+        all_restored_hour = int(np.ceil(med["rest"].max()))
+    if med is not None and med["out"][pidx]:
+        # Match the hourly map's floor(onset) / ceil(restoration) convention.
+        lost, back = float(np.floor(med["st"][pidx])), float(np.ceil(med["rest"][pidx]))
         assess = (res.get("operations") or {}).get("assess_hours", 2.0)
-        hits = float(np.min(out_runs[k]["when"]))
+        hits = float(np.floor(np.min(med["when"])))
         timeline = dict(storm_hits=_r(min(hits, lost)), power_lost=_r(lost), confirmed=_r(min(lost + assess, back)),
                         estimate_updated=_r(lost + 0.4 * (back - lost)) if back - lost > 4 else None,
                         restored=_r(back), hours_out=_r(back - lost))
     event = dict(area=f"ZIP {pr.zip}", area_share=_r(area_share, 3), home_share=_r(mc_out, 3), runs=len(runs),
-                 timeline=timeline)
+                 timeline=timeline, timeline_source="map_run", all_restored_hour=all_restored_hour)
 
     # contributing factors (cell weather terms + topology exposure)
     m = risk.model()
