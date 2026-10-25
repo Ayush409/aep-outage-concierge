@@ -47,7 +47,7 @@ def _curve(res):
     if not runs:
         return dict(hours=[], p10=[], p50=[], p90=[])
     H = len(runs[0]["curve"])
-    last = max(int(max(r["rest"].max() for r in runs)) + 6, res["weather_hours"])
+    last = max(int(max(r["rest_max"] for r in runs)) + 6, res["weather_hours"])
     last = min(last, H)
     m = np.stack([r["curve"][:last] for r in runs])
     step = max(1, last // 240)

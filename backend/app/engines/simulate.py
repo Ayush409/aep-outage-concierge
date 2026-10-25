@@ -217,7 +217,7 @@ def _schedule(release, dur, prio, n_local, n_aid, aid_start, cap, cum):
 
 
 # ------------------------------------------------------------------ main entry
-@lru_cache(maxsize=48)
+@lru_cache(maxsize=12)  # ~20 MB per result; scenario/crew changes add entries
 def run(p: Params) -> dict:
     g = grid()
     sc = SCENARIOS[p.scenario]
@@ -431,6 +431,10 @@ def _summarize(p, sc, hourly, lam, peak, contrib, dev_rate, p_out, runs, H, rule
     if sc["kind"] == "live" and lam.sum() < 1:
         notes.append("No damaging weather in the forecast.")
 
+    for r in valid:  # per-premise times are only needed for the median run: drop them to keep the cache small
+        r["rest_max"] = float(r["rest"].max())
+        if r is not med:
+            del r["st"], r["rest"]
     return dict(params=p.__dict__, scenario=dict(id=p.scenario, **{k: v for k, v in sc.items() if k != "weather"}),
                 time=[t.isoformat() for t in pd.date_range(hourly.time.iloc[0], periods=H, freq="h")],
                 weather_hours=hourly.hours, hourly=hourly, lam=lam, peak=peak, contrib=contrib,
