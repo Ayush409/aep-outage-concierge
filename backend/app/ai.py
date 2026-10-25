@@ -177,3 +177,135 @@ def preparation_plan(ctx: dict) -> dict:
     except Exception as e:  # no credentials, refusal, network: band-scaled templates
         log.info("AI prep unavailable (%s); using templates", type(e).__name__)
         return dict(**_fallback_prep(ctx), source="template")
+
+
+# ------------------------------------------------------------------ "Ask the Concierge" chat
+CHAT_SYSTEM = """You are the AEP Outage Concierge, a friendly assistant that helps one AEP customer understand storm-related
+power outages for their home. Answer using ONLY the FACTS JSON below (this customer's model results for the selected
+forecast or storm simulation).
+
+Rules:
+- Never invent numbers, times, causes or places. If the facts don't cover something, say you don't know and point the
+  customer to AEP (aep.com, the AEP app, or 1-800-956-4237).
+- Keep estimates labelled as estimates. "home_lost_share" is how often this home lost power across simulated runs;
+  "area_lost_share" is the share of homes in their area that lose power. Never call either a guarantee.
+- If is_simulation is true, make clear this is a simulated storm, not a real forecast.
+- SAFETY FIRST: if the customer mentions a downed line, sparks, fire, a gas smell, or a medical emergency, start with:
+  "If this is an emergency, call 911 now. Stay at least 35 feet away from downed lines." For downed lines, also say to
+  report them to AEP at 1-800-956-4237.
+- Only mention medical equipment advice if declared_needs includes it, or if the customer asks about it - and then
+  only "contact your provider or go to a hospital if your equipment needs power".
+- You cannot report an outage, change account settings, or see other customers. Say how they can do it instead
+  (report outages to AEP; alert settings are in My Data & Privacy in this app).
+- Stay on topic: power outages, storms, restoration, preparation, safety and alerts. Politely decline anything else.
+- Plain language a 12-year-old understands. Short answers: 2-5 sentences, or a short list for steps.
+"""
+
+OPS_CHAT_SYSTEM = """You are the AEP Operations Copilot, an assistant for AEP storm-response operators and planners.
+Answer using ONLY the FACTS JSON below (model results for the selected forecast or storm simulation at the current
+crew settings).
+
+Rules:
+- Never invent numbers, times, places, circuits or costs. If the facts don't cover something, say so and point to the
+  right tab in this app (Ops Map, Simulation, Restoration Jobs, Business Impact, Communications, Model Audit, Settings).
+- Model outputs come from Monte Carlo runs: give the typical (p50) value and the p10-p90 range when it matters, and
+  say they are model estimates. Mention the confidence level when the question depends on it.
+- If is_simulation is true, say it is a simulated storm, not a live forecast.
+- Values in "hours" are hours after window_start; prefer the *_at fields for clock times when they are given.
+- crew_what_if holds quick 12-run re-simulations of the same storm with half, current and double crews: use it for
+  "are crews enough / what if we add or cut crews" questions. Crew sliders are on the Simulation tab; the total-cost vs
+  crews curve is on Business Impact.
+- You may recommend actions (staging crews, requesting mutual aid, prioritising circuits or life-support customers,
+  sending alerts) but explain the reason from the facts and leave the decision to the operator. You cannot change
+  settings, dispatch crews or send messages yourself.
+- Customer privacy: talk about areas, circuits and counts only. Never name customers or give addresses.
+- Stay on topic: storm risk, outages, restoration, crews, costs, customer communications and the model. Politely
+  decline anything else.
+- Be concise and operational: a one-sentence answer first, then at most 5 short one-line bullets.
+"""
+
+MAX_TURNS = 12
+
+
+def _clean_history(history: list[dict]) -> list[dict]:
+    """Keep the last turns, user/assistant only, alternating, ending with the user's message."""
+    msgs = [dict(role=m["role"], content=str(m["content"])[:1500]) for m in history
+            if m.get("role") in ("user", "assistant") and str(m.get("content", "")).strip()]
+    msgs = msgs[-MAX_TURNS:]
+    while msgs and msgs[0]["role"] != "user":
+        msgs.pop(0)
+    out = []
+    for m in msgs:  # merge accidental repeats of the same role
+        if out and out[-1]["role"] == m["role"]:
+            out[-1]["content"] += "\n" + m["content"]
+        else:
+            out.append(m)
+    return out
+
+
+def _fallback_chat(facts: dict, question: str) -> str:
+    q = question.lower()
+    if any(w in q for w in ("down", "spark", "fire", "gas", "emergency", "911", "hurt")):
+        return ("If this is an emergency, call 911 now. Stay at least 35 feet away from downed lines and anything "
+                "touching them, and report them to AEP at 1-800-956-4237.")
+    est = facts.get("restoration")
+    if any(w in q for w in ("how long", "restor", "back on", "when will")):
+        return (f"If your power goes out, restoration is {est['label']} (a model estimate)."
+                if est else "In most simulated runs your power stays on, so there's no restoration estimate.")
+    if any(w in q for w in ("prepare", "ready", "do i", "should i", "safe")):
+        return "Here's what to do now: " + " ".join(facts["preparation"]["now"][:3])
+    if "alert" in q or "text" in q or "notif" in q:
+        return facts["alerts"]["reason"]
+    if any(w in q for w in ("why", "cause")):
+        return "The main reasons: " + "; ".join(facts["factors"][:3]) + "."
+    pct = round(100 * (facts.get("area_lost_share") or 0))
+    return (f"Your outage risk band is {facts['band']}. About {pct}% of homes in {facts['area']} lose power in this "
+            f"{'simulated storm' if facts['is_simulation'] else 'forecast'}. Ask me how long restoration could take, "
+            "how to prepare, or about alerts.")
+
+
+def _fallback_ops_chat(facts: dict, question: str) -> str:
+    q = question.lower()
+    s = facts["summary"]
+    if any(w in q for w in ("cost", "revenue", "dollar", "$", "impact")) and facts.get("cost"):
+        c = facts["cost"]
+        return (f"Estimated lost revenue ${c['lost_revenue']:,}, repair about ${c['repair']['total_mid']:,} and "
+                f"customer cost ${c['customer_cost']:,}. See Business Impact for the breakdown.")
+    if any(w in q for w in ("zip", "circuit", "worst", "where", "area")):
+        z = ", ".join(f"{a['id']} ({a['pct_out']}%)" for a in facts["worst_zips"][:3]) or "none"
+        return f"At the peak hour the hardest-hit ZIPs are {z}. The Ops Map shows every ZIP and circuit."
+    if any(w in q for w in ("crew", "mutual", "restor", "how long")):
+        return (f"With {facts['crews']['local']} local and {facts['crews']['mutual_aid']} mutual-aid crews, 90% of "
+                f"customers are restored in about {s['hours_to_90pct']['p50']} h (p10-p90 "
+                f"{s['hours_to_90pct']['p10']}-{s['hours_to_90pct']['p90']} h).")
+    return (f"{facts['scenario']}: about {s['customers_out']['p50']:,.0f} customers out (p10-p90 "
+            f"{s['customers_out']['p10']:,.0f}-{s['customers_out']['p90']:,.0f}), roughly {s['jobs']['p50']:.0f} "
+            "repair jobs. Ask about crews, costs, the worst areas or life-support customers.")
+
+
+def chat(facts: dict, history: list[dict], ops: bool = False) -> dict:
+    """{reply, source}. Claude answers from this customer's facts only; template fallback otherwise."""
+    msgs = _clean_history(history)
+    if not msgs or msgs[-1]["role"] != "user":
+        return dict(reply="Ask me anything about the storm, outages, crews or costs." if ops else
+                    "Ask me anything about your power, a storm, or how to prepare.", source="template")
+    try:
+        resp = _client().beta.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=2000,
+            system=(OPS_CHAT_SYSTEM if ops else CHAT_SYSTEM) + "\nFACTS (JSON):\n" + json.dumps(facts, sort_keys=True, default=str),
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            output_config={"effort": "low"},
+            messages=msgs,
+        )
+        if resp.stop_reason == "refusal":
+            raise RuntimeError("refusal")
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        if not text:
+            raise RuntimeError("empty")
+        return dict(reply=text, source="claude")
+    except Exception as e:  # no credentials, refusal, network
+        log.info("AI chat unavailable (%s); using templates", type(e).__name__)
+        fb = _fallback_ops_chat if ops else _fallback_chat
+        return dict(reply=fb(facts, msgs[-1]["content"]), source="template")

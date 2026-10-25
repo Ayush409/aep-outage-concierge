@@ -13,6 +13,7 @@ import Restoration from "./pages/Restoration.jsx";
 import Impact from "./pages/Impact.jsx";
 import Comms from "./pages/Comms.jsx";
 import ModelAudit from "./pages/ModelAudit.jsx";
+import ChatWidget from "./components/ChatWidget.jsx";
 
 const Ctx = createContext(null);
 export const useApp = () => useContext(Ctx);
@@ -146,6 +147,7 @@ function Shell() {
           )}
         </Routes>
       </div>
+      <ChatWidget key={user.role} aep={aep} />
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className={`toast${t.sim ? " sim" : ""}`}>{t.text}</div>)}
       </div>

@@ -5,6 +5,7 @@ Run (from repo root):  .venv/Scripts/python -m uvicorn app.main:app --app-dir ba
 import json
 import secrets
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -309,6 +310,51 @@ def my_status(p: simulate.Params = Depends(params), user=Depends(require_custome
     return out
 
 
+class ChatBody(BaseModel):
+    messages: list[dict] = Field(max_length=40)
+    scenario: str | None = None
+
+
+def _when(start: str, hours: float | None) -> str | None:
+    if hours is None:
+        return None
+    t = datetime.fromisoformat(start) + timedelta(hours=float(hours))
+    return t.strftime("%a %b %d, %I %p").replace(" 0", " ")
+
+
+@app.post("/api/me/chat")
+def my_chat(body: ChatBody, user=Depends(require_customer)):
+    """Ask the Concierge: Claude answers from this customer's own model results (no name, address or phone)."""
+    p = params(scenario=body.scenario)
+    prof = _profile(user["id"])
+    res = sim(p)
+    v = customer_view(res, _premise_idx(prof["premise"]), prof["needs"],
+                      dict(alerts_sms=prof["alerts_sms"], alerts_inapp=prof["alerts_inapp"],
+                           phone=prof["phone_enc"] if prof["phone_verified"] else None))
+    ev, est, start = v["event"], v["restoration"], v["start"]
+    t = ev["timeline"]
+    facts = dict(
+        scenario=v["scenario"]["name"], is_simulation=v["scenario"]["kind"] != "live",
+        now=datetime.now().strftime("%a %b %d, %I %p").replace(" 0", " ") if v["scenario"]["kind"] == "live" else None,
+        band=v["risk"]["band"], area=ev["area"], area_lost_share=ev["area_share"], home_lost_share=ev["home_share"],
+        simulated_runs=ev["runs"], confidence=v["confidence"]["level"], confidence_notes=v["confidence"]["notes"],
+        factors=v["factors_plain"], service=v["premise"]["service"], peak_weather=v["risk"]["weather"],
+        restoration=dict(label=est["label"], typical_hours=est["p50"], short_hours=est["p10"], long_hours=est["p90"])
+        if est else None,
+        typical_run_timeline={k: _when(start, t[k]) for k in ("storm_hits", "power_lost", "confirmed",
+                                                               "estimate_updated", "restored")} | {"hours_out": t["hours_out"]}
+        if t else None,
+        likely_cause=v["cause_plain"], what_crews_fix=v["fixed_plain"], delay_reason=v["delay_reason"],
+        preparation={k: v["preparation"][k] for k in ("emergency", "now", "if_out", "your_needs")},
+        alerts=dict(eligible=v["alerts"]["eligible"], reason=v["alerts"]["reason"], channels=v["alerts"]["channels"],
+                    timing=v["alerts"]["timing"]),
+        declared_needs=prof["needs"],
+    )
+    out = ai.chat(facts, body.messages)
+    db.audit(user["id"], "chat", dict(scenario=p.scenario, source=out["source"]))  # no message content stored
+    return out
+
+
 @app.get("/api/me/prepare")
 def my_prepare(p: simulate.Params = Depends(params), user=Depends(require_customer)):
     """Preparation guidance scaled to this home's risk band (Claude picks and words from approved tips)."""
@@ -498,6 +544,72 @@ def aep_customers(user=Depends(require_aep)):
                            "JOIN customer_profiles c ON c.user_id = u.id").fetchall()
     return [dict(id=r["id"], name=r["name"], email=r["email"], zip=decrypt(r["zip_enc"]),
                  needs=json.loads(decrypt(r["needs_enc"]) or "[]")) for r in rows]
+
+
+@app.post("/api/aep/chat")
+def aep_chat(body: ChatBody, user=Depends(require_aep)):
+    """Operations Copilot: Claude answers from the operator's model results (areas, circuits and counts - no names)."""
+    p = params(scenario=body.scenario)
+    res = sim(p)
+    o = views.overview(res, aep=True)
+    sc = SCENARIOS[p.scenario]
+    start, curve = o["start"], o["curve"]
+    peak = max(range(len(curve["p50"])), key=lambda i: curve["p50"][i]) if curve["p50"] else None
+    areas = views.area_outages(res)
+    jl = views.jobs(res)
+    by_type: dict[str, int] = {}
+    for j in jl:
+        by_type[j["type"]] = by_type.get(j["type"], 0) + 1
+    biggest = sorted(jl, key=lambda j: -j["customers_behind"])[:8]
+    prem = grid().prem
+    plon, plat = prem.lon.to_numpy(), prem.lat.to_numpy()
+
+    def _where(j):  # circuit / ZIP of the nearest premise (assets carry no circuit id)
+        k = int(np.argmin((plon - j["lon"]) ** 2 + (plat - j["lat"]) ** 2))
+        return dict(circuit=str(prem.circuit.iloc[k]), zip=str(prem.zip.iloc[k]))
+
+    what_if = []
+    for f in (0.5, 1, 2):  # quick 12-run crew what-ifs (same storm)
+        lc, ma = max(1, round(p.crews * f)), round(p.mutual_aid_crews * f)
+        s_ = sim(simulate.Params(scenario=p.scenario, crews=lc, mutual_aid_crews=ma,
+                                 mutual_aid_day=p.mutual_aid_day, runs=12))["summary"]
+        what_if.append(dict(local_crews=lc, mutual_aid_crews=ma, hours_to_90pct=s_["hours_to_90pct"],
+                            hours_to_all=s_["hours_to_all"], crew_wait_hours=s_["crew_wait_hours"]))
+    with db.tx() as con:
+        esc = [r["body"] for r in con.execute("SELECT body FROM notifications WHERE scenario = ? AND escalation = 1 "
+                                              "ORDER BY id DESC LIMIT 10", (p.scenario,)).fetchall()]
+    c = o["cost"]
+    facts = dict(
+        scenario=sc["name"], is_simulation=sc["kind"] != "live", window_start=_when(start, 0),
+        now=datetime.now().strftime("%a %b %d, %I %p").replace(" 0", " ") if sc["kind"] == "live" else None,
+        learned_from=sc.get("learned_from"), scenario_notes=sc.get("notes"),
+        crews=dict(local=p.crews, mutual_aid=p.mutual_aid_crews, mutual_aid_arrives_day=p.mutual_aid_day,
+                   note="Default crews. Operators can try other numbers with the sliders on the Simulation tab."),
+        crew_what_if=what_if,
+        operations=o["operations"], confidence=o["confidence"], summary=o["summary"],
+        peak=dict(hour=curve["hours"][peak], at=_when(start, curve["hours"][peak]),
+                  customers_out_p10=curve["p10"][peak], customers_out_p50=curve["p50"][peak],
+                  customers_out_p90=curve["p90"][peak]) if peak is not None else None,
+        worst_zips_at_peak=areas["zip"][:8], worst_circuits_at_peak=areas["circuit"][:8],
+        jobs_typical_run=dict(count=len(jl), by_type=by_type, access_issues=sum(j["access_issue"] for j in jl),
+                              special_equipment=sum(j["special_equipment"] for j in jl),
+                              life_support_customers_behind=sum(j["life_support_behind"] for j in jl),
+                              biggest=[dict(type=j["type"], **_where(j), customers_behind=j["customers_behind"],
+                                            life_support_behind=j["life_support_behind"],
+                                            repair_starts_at=_when(start, j["start"]),
+                                            repair_done_at=_when(start, j["finish"]),
+                                            access_issue=j["access_issue"]) for j in biggest]),
+        cost=dict(lost_revenue=c["lost_revenue"], repair=c["repair"], customer_cost=c["customer_cost"],
+                  customer_hours=c["customer_hours"], kwh_not_served=c["kwh_not_served"],
+                  formulas=c["formulas"]) if c else None,
+        settings={k: db.get_setting(k) for k in db.DEFAULT_SETTINGS},
+        recent_escalations=esc,
+    )
+    facts["worst_zips"] = facts.pop("worst_zips_at_peak")
+    facts["worst_circuits"] = facts.pop("worst_circuits_at_peak")
+    out = ai.chat(facts, body.messages, ops=True)
+    db.audit(user["id"], "ops_chat", dict(scenario=p.scenario, source=out["source"]))  # no message content stored
+    return out
 
 
 @app.get("/api/aep/impact")
