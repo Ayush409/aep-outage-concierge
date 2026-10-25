@@ -121,20 +121,26 @@ def _rule_rates(sc: dict, hourly, n_assets: int):
     is_x = (a.asset_type == "transformer").to_numpy()
     kva = np.maximum(a.kva.fillna(25).to_numpy(), 10)
     cust = a.customers.fillna(1).to_numpy()
-    if "heat" in rules or "cold" in rules:
+    if "heat" in rules:
         t_x = temp[pt[acell[is_x]]]  # (transformers, hours)
-        if "heat" in rules:
-            load_kw = 4.0  # assumption: peak household demand in extreme heat
-            stress = np.maximum(t_x - 95, 0) / 10
-            k = 0.0008  # tuned so a 115 F multi-day heat wave fails a few % of transformers
-        else:
-            load_kw = 5.0  # assumption: electric heat at single-digit temperatures
-            stress = np.maximum(10 - t_x, 0) / 10
-            k = 0.0006
+        load_kw = 4.0  # assumption: peak household demand in extreme heat
+        stress = np.maximum(t_x - 95, 0) / 10
+        k = 0.0008  # tuned so a 115 F multi-day heat wave fails a few % of transformers
         ratio = np.maximum(cust[is_x] * load_kw / kva[is_x], 0.2)
         dose = stress.sum(axis=1) * ratio
         rate[is_x] += np.minimum(k * dose, 0.5)
         when[is_x] = np.argmax(stress, axis=1)
+    if "cold" in rules:
+        # Heating load rises as it gets colder (1.5 kW/home at 50 F -> 5 kW at 10 F, assumption), but cold air also
+        # cools the transformer: ~1% more capacity per deg C below 30 C, up to +50%. Only sustained overloads above
+        # 2x the cold-adjusted rating count, and each such transformer fails with a small chance (2% after 24 h).
+        # Calibrated to Dec 2022 (Roanoke): outages were wind damage, with no reports of widespread overload failures.
+        t_x = temp[pt[acell[is_x]]]
+        load = cust[is_x, None] * np.clip(1.5 + 3.5 * (50 - t_x) / 40, 1.5, 5.0)
+        cap = kva[is_x, None] * np.clip(1 + 0.01 * (30 - (t_x - 32) / 1.8), 1.0, 1.5)
+        over = load > 2.0 * cap
+        rate[is_x] += 0.02 * np.minimum(over.sum(axis=1), 24) / 24
+        when[is_x] = np.where(over.any(axis=1), np.argmax(over, axis=1), when[is_x])
     if "tornado" in rules:
         tracks = tornado_tracks()
         xy = np.column_stack([(a.lon.to_numpy() + 80) * 88_700, (a.lat.to_numpy() - 37.24) * 110_540])
@@ -145,7 +151,7 @@ def _rule_rates(sc: dict, hourly, n_assets: int):
         for tr in tracks:
             p0 = np.array([(tr["slon"] + 80) * 88_700, (tr["slat"] - 37.24) * 110_540])
             p1 = np.array([(tr["elon"] + 80) * 88_700, (tr["elat"] - 37.24) * 110_540])
-            half = max(tr["width_yd"] * 0.9144 / 2, 40.0)
+            half = max(0.5 * tr["width_yd"] * 0.9144 / 2, 40.0)  # SPC width is the maximum; mean path ~half
             seg = p1 - p0
             L2 = float(seg @ seg) or 1.0
             tt = np.clip(((xy - p0) @ seg) / L2, 0, 1)
@@ -153,8 +159,12 @@ def _rule_rates(sc: dict, hourly, n_assets: int):
             hit = (d <= half) & overhead
             if not hit.any():
                 continue
-            p = p_ef.get(tr["mag"], 0.5)
-            rate[hit] += -math.log(1 - p)
+            # A tornado is only at its rated strength near the centre of the path and for part of its length:
+            # inner third of the width at the rating, middle third one EF lower, outer third two lower; the first
+            # and last 20% of the track one EF lower again (assumption, typical of NWS damage surveys).
+            ef = tr["mag"] - np.floor(3 * d[hit] / half).clip(0, 2) - ((tt[hit] < 0.2) | (tt[hit] > 0.8))
+            p = np.where(ef >= 0, np.vectorize(lambda e: p_ef.get(int(e), 0.15))(ef.clip(0, 5)), 0.05)
+            rate[hit] += -np.log(1 - p)
             hh, mm = int(tr["time"][:2]), int(tr["time"][3:5])
             t_hit = (pd.Timestamp("2011-04-27") + pd.Timedelta(hours=hh + 1, minutes=mm) - start)  # CST -> EDT
             when[hit] = t_hit.total_seconds() / 3600
@@ -381,7 +391,10 @@ def _summarize(p, sc, hourly, lam, peak, contrib, dev_rate, p_out, runs, H, rule
     stats = pd.DataFrame(per_run) if per_run else pd.DataFrame(
         [dict(customers_out=0, peak_out=0, customer_hours=0, t_all=0, t90=0, jobs=0, person_hours=0, median_hours=0,
               t90_after_onset=0, crew_wait=0)])
-    med_i = int(np.argsort(stats.customer_hours.to_numpy())[len(stats) // 2]) if valid else -1
+    # the run shown on maps and used for costs: the most typical one on customers out, peak and customer-hours together
+    # (a run that is median on one measure alone can be extreme on another)
+    rk = stats[["customers_out", "peak_out", "customer_hours"]].rank(pct=True)
+    med_i = int(np.argmin((rk - 0.5).abs().sum(axis=1).to_numpy())) if valid else -1
     med = valid[med_i] if valid else None
 
     def q(col):

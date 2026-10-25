@@ -24,32 +24,42 @@ export default function OutageMap({ aep = false }) {
   const pins = useFetch(aep ? `/api/aep/pins${q}` : null, [scenario]).data;
   const fac = useFetch(aep ? "/api/aep/facilities" : null).data;
   const [layer, setLayer] = useState(aep ? null : "wind_gusts_10m");
-  const [hour, setHour] = useState(0);
+  const [hour, setHour] = useState(0); // hours since the start of the window (= outage frame index)
   const [show, setShow] = useState({ risk: true, out: true, pins: true, fac: true });
 
-  // weather hours and outage frames share hour 0; frames are hourly, weather may be every 2 h
+  // One hourly timeline for everything over the weather window: the map / cards / tables read the same frame, and
+  // weather shows its nearest time step.
   const wxStep = weather && weather.time.length > 1 ? (new Date(weather.time[1]) - new Date(weather.time[0])) / 3.6e6 : 1;
-  const frameAt = (h) => Math.min(Math.round(h * wxStep), (frames?.hours?.length || 1) - 1);
-  const evHour = frameAt(hour); // hours since the start of the window
+  const nWx = weather?.time.length || 0;
+  const times = useMemo(() => {
+    if (!weather) return null;
+    const t0 = new Date(weather.time[0]).getTime();
+    const n = Math.round((nWx - 1) * wxStep) + 1;
+    return Array.from({ length: n }, (_, i) => new Date(t0 + i * 3.6e6).toISOString());
+  }, [weather, frames, nWx, wxStep]);
+  const evHour = Math.min(hour, Math.max((frames?.hours?.length || 1) - 1, 0));
+  const wxIdx = Math.min(Math.floor(hour / wxStep), Math.max(nWx - 1, 0));
 
+  // totals include small areas the map hides for privacy, so cards = ZIP / circuit table sums
+  const frameTotal = (h) => frames?.total?.[h] ?? 0;
   const peak = useMemo(() => {
-    if (!frames?.cells?.length || !weather) return null;
+    if (!frames?.cells?.length) return null;
     let best = { h: 0, total: 0 };
-    for (let h = 0; h < weather.time.length; h++) {
-      const fi = frameAt(h);
-      const total = frames.out.reduce((a, row) => a + (row[fi] >= 5 ? row[fi] : 0), 0);
+    const end = Math.min(frames.hours.length, Math.round((nWx - 1) * wxStep) + 1); // peak within the slider
+    for (let h = 0; h < end; h++) {
+      const total = frameTotal(h);
       if (total > best.total) best = { h, total };
     }
     return best.total ? best : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frames, weather, wxStep]);
+  }, [frames, nWx, wxStep]);
 
   // live forecast opens at "now"; a storm simulation opens at its peak outage hour
   useEffect(() => {
-    if (!weather) return;
-    if (scenario === "live") setHour(nowIndex(weather));
+    if (!weather || !times) return;
+    if (scenario === "live") setHour(nowIndex({ time: times }));
     else if (peak) setHour(peak.h);
-  }, [weather, scenario, peak]);
+  }, [weather, times, scenario, peak]);
 
   const [areaHour, setAreaHour] = useState(null);
   useEffect(() => {
@@ -63,10 +73,11 @@ export default function OutageMap({ aep = false }) {
     if (!frames?.cells?.length) return [];
     return frames.cells.map((c, i) => ({ ...c, out: frames.out[i][evHour] })).filter((c) => c.out >= 5);
   }, [frames, evHour]);
-  const pinState = (p) => (p.out_at > evHour ? "pending" : p.restored_at <= evHour ? "restored" : "out");
-  const outNow = aep && pins
-    ? pins.filter((p) => pinState(p) === "out").reduce((a, p) => a + p.customers, 0)
-    : outCells.reduce((a, c) => a + c.out, 0);
+  // same hour rule as the frames: out during hour h if floor(out) <= h < ceil(restored)
+  const pinState = (p) => (Math.floor(p.out_at) > evHour ? "pending" : Math.ceil(p.restored_at) <= evHour ? "restored"
+    : "out");
+  // pins are nested (a fuse inside an out recloser), so customer counts come from the map frames, never the pins
+  const outNow = frameTotal(evHour);
 
   const layers = [
     show.risk && cells && new PolygonLayer({
@@ -74,7 +85,7 @@ export default function OutageMap({ aep = false }) {
       getFillColor: (d) => [...BAND_RGB[d.band], d.band === "Low" ? 0 : 50],
       getLineColor: (d) => [...BAND_RGB[d.band], d.band === "Low" ? 0 : 150], lineWidthMinPixels: 1,
     }),
-    weatherLayer(weather, layer, hour, !!layer),
+    weatherLayer(weather, layer, wxIdx, !!layer),
     show.out && new ScatterplotLayer({
       id: "out", data: outCells, getPosition: (d) => [d.lon, d.lat], radiusUnits: "pixels",
       getRadius: (d) => 9 + Math.sqrt(d.out) * 0.9, getFillColor: [200, 16, 46, 210], stroked: true,
@@ -104,9 +115,9 @@ export default function OutageMap({ aep = false }) {
   function wxLine(coordinate) {
     if (!weather || !layer || !coordinate) return "";
     const [lon, lat] = coordinate;
-    const v = Math.round(sample(weather, layer, hour, lon, lat));
+    const v = Math.round(sample(weather, layer, wxIdx, lon, lat));
     const dir = LAYERS[layer].kind === "wind"
-      ? ` from the ${compassName(sample(weather, "wind_direction_10m", hour, lon, lat))}` : "";
+      ? ` from the ${compassName(sample(weather, "wind_direction_10m", wxIdx, lon, lat))}` : "";
     return `<br/><b>${LAYERS[layer].label}: ${v} ${LAYERS[layer].unit}</b>${dir}`;
   }
 
@@ -144,16 +155,18 @@ export default function OutageMap({ aep = false }) {
               <span className="small muted">{status.premise.city} {status.premise.zip}</span></div>
           )}
           <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <Stat label="Out at this time" value={fmt.n(outNow)} />
-            <Stat label="Expected out (event)" value={fmt.n(s?.expected_customers_out)}
-              sub={s ? `of ${fmt.n(s.total_customers)}` : ""} />
+            <Stat label="Out at this time" value={fmt.n(outNow)}
+              sub={peak ? `peak ${fmt.n(peak.total)}` : "none"} />
+            <Stat label="Outage at some point" value={fmt.n(frames?.customers_out)}
+              sub={s ? `of ${fmt.n(s.total_customers)} - range ${fmt.n(s.customers_out.p10)}-${fmt.n(s.customers_out.p90)}`
+                : ""} />
           </div>
-          {weather && <TimeSlider times={weather.time} hour={hour} setHour={setHour} />}
+          {times && <TimeSlider times={times} hour={evHour} setHour={setHour} />}
           {peak && <button className="chip" onClick={() => setHour(peak.h)}>Jump to peak outage
             ({fmt.n(peak.total)} customers)</button>}
-          <WeatherControls layer={layer} setLayer={setLayer} legendWeather={weather} legendHour={hour} />
+          <WeatherControls layer={layer} setLayer={setLayer} legendWeather={weather} legendHour={wxIdx} />
           {weather && layer && !aep && status?.home && (
-            <div className="small secondary">At your home: <b>{Math.round(sample(weather, layer, hour, status.home.lon,
+            <div className="small secondary">At your home: <b>{Math.round(sample(weather, layer, wxIdx, status.home.lon,
               status.home.lat))} {LAYERS[layer].unit}</b></div>)}
           <div className="small stack">
             {toggles.map(([k, label]) => (
@@ -167,8 +180,8 @@ export default function OutageMap({ aep = false }) {
         </div>
         <div className="map-panel tr stack" style={{ width: 300, maxHeight: "calc(100% - 60px)", overflow: "auto" }}>
           <h3 style={{ margin: 0 }}>% without power</h3>
-          <div className="small muted">At this time on the slider. AEP customers in this data set; areas under 5 customers
-            hidden.</div>
+          <div className="small muted">At this time on the slider (typical simulated run, same as the map). AEP
+            customers in this data set; areas under 5 customers hidden.</div>
           <AreaTable title="ZIP code" rows={areas?.zip} highlight={!aep ? status?.premise?.zip : null} />
           {aep && <AreaTable title="Circuit" rows={areas?.circuit} />}
         </div>

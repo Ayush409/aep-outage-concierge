@@ -131,8 +131,13 @@ def expected_damage(hourly, snow_ice_equiv: float = 0.0) -> tuple[np.ndarray, pd
     g = grid()
     f = cell_day_features(hourly)
     if snow_ice_equiv:
-        wet = (f.tmin.to_numpy() >= 20) & (f.tmax.to_numpy() <= 38)  # heavy, sticky snow near freezing
-        f["frz"] = f.frz.to_numpy() + snow_ice_equiv * np.where(wet, f.snow.to_numpy(), 0.0)
+        # Only snow that falls at 30-35 F is wet enough to stick to lines and limbs; colder, dry snow does not
+        # accrete (it still counts through the ordinary snow-load term). Judged hour by hour, not by the day's range.
+        hf = hourly.f
+        wet_snow = np.where((hf["temperature_2m"] >= 30) & (hf["temperature_2m"] <= 35), hf["snowfall"], 0.0)
+        from .weather import Hourly
+        wet = cell_day_features(Hourly(hourly.time, {**hf, "snowfall": wet_snow})).snow.to_numpy()
+        f["frz"] = f.frz.to_numpy() + snow_ice_equiv * wet
     X = design(f, g.cells)
     m = model()
     lam_rows = m.rate(X, exposure(g.cells)[f.cellpos.to_numpy()]) * wind_adjustment(f, m)

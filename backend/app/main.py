@@ -20,7 +20,7 @@ from . import ai, db, geocode, guidance
 from .config import DEV_MODE, SESSION_HOURS, TWILIO_FROM, TWILIO_SID, TWILIO_TOKEN
 from .engines import risk, simulate, views
 from .engines.data import PROCESSED, grid
-from .engines.scenarios import SCENARIOS, catalogue, display_weather
+from .engines.scenarios import SCENARIOS, catalogue, default_crews, display_weather
 from .security import (COOKIE, check_password, current_user, decrypt, encrypt, hash_password, hash_token,
                        make_session, new_reset_token, require_aep, require_customer)
 
@@ -39,11 +39,14 @@ def _startup():
 
 
 # ------------------------------------------------------------------ helpers
-def params(scenario: str | None = None, crews: int = 20, mutual_aid_crews: int = 20, mutual_aid_day: float = 1.0,
-           gust_mult: float = 1.0, access_mult: float = 1.0) -> simulate.Params:
+def params(scenario: str | None = None, crews: int | None = None, mutual_aid_crews: int | None = None,
+           mutual_aid_day: float = 1.0, gust_mult: float = 1.0, access_mult: float = 1.0) -> simulate.Params:
     sid = scenario or db.get_setting("active_scenario")
     if sid not in SCENARIOS:
         raise HTTPException(404, "Unknown scenario")
+    d = default_crews(sid)
+    crews = d["crews"] if crews is None else crews
+    mutual_aid_crews = d["mutual_aid_crews"] if mutual_aid_crews is None else mutual_aid_crews
     return simulate.Params(scenario=sid, crews=int(np.clip(crews, 1, 400)),
                            mutual_aid_crews=int(np.clip(mutual_aid_crews, 0, 400)),
                            mutual_aid_day=float(np.clip(mutual_aid_day, 0, 10)),
@@ -584,7 +587,7 @@ def aep_chat(body: ChatBody, user=Depends(require_aep)):
         now=datetime.now().strftime("%a %b %d, %I %p").replace(" 0", " ") if sc["kind"] == "live" else None,
         learned_from=sc.get("learned_from"), scenario_notes=sc.get("notes"),
         crews=dict(local=p.crews, mutual_aid=p.mutual_aid_crews, mutual_aid_arrives_day=p.mutual_aid_day,
-                   note="Default crews. Operators can try other numbers with the sliders on the Simulation tab."),
+                   note="Scenario default crews. Operators can try other numbers with the Simulation tab sliders."),
         crew_what_if=what_if,
         operations=o["operations"], confidence=o["confidence"], summary=o["summary"],
         peak=dict(hour=curve["hours"][peak], at=_when(start, curve["hours"][peak]),
@@ -624,7 +627,7 @@ def aep_compare(user=Depends(require_aep)):
     for sid, sc in SCENARIOS.items():
         if sid == "live":
             continue
-        res = sim(simulate.Params(scenario=sid))
+        res = sim(simulate.Params(scenario=sid, **default_crews(sid)))
         c = res["cost"]
         if c is None:
             out.append(dict(id=sid, name=sc["name"], lost_revenue=0, repair=0, customer_cost=0, customers_out=0))

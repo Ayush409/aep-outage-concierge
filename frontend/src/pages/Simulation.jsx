@@ -14,8 +14,12 @@ const N_PARTICLES = 1400;
 export default function Simulation() {
   const { scenarios, scenario, setScenario, user } = useApp();  // selection comes from the top-right toggle
   const aep = user.role === "aep";
-  const [draft, setDraft] = useState(DEFAULTS);
-  const [params, setParams] = useState(DEFAULTS);
+  // each storm starts from its own crew defaults (e.g. a tornado outbreak comes with a big mutual-aid call)
+  const defaults = useMemo(() => ({ ...DEFAULTS, ...(scenarios.find((x) => x.id === scenario)?.default_crews || {}) }),
+    [scenarios, scenario]);
+  const [draft, setDraft] = useState(defaults);
+  const [params, setParams] = useState(defaults);
+  useEffect(() => { setDraft(defaults); setParams(defaults); }, [defaults]);
   // re-run automatically shortly after a slider stops moving
   useEffect(() => {
     const t = setTimeout(() => setParams(draft), 600);
@@ -124,7 +128,7 @@ export default function Simulation() {
         <Slider label="Access problems" v={draft.access_mult} min={0} max={3} step={0.25} fmtv={(v) => `${v}x`}
           on={(v) => setDraft({ ...draft, access_mult: v })} />
         <div className="row">
-          <button onClick={() => setDraft(DEFAULTS)}>Reset</button>
+          <button onClick={() => setDraft(defaults)}>Reset</button>
           <span className="small muted" role="status">{ov.loading ? "Re-running..." : "Results update as you move a slider"}</span>
         </div>
         <div className="small muted">Bucket trucks stop at 30 mph gusts. Each run repeats 40 times with random job times

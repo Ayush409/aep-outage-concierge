@@ -22,7 +22,9 @@ SCENARIOS = {
         name="Tornado outbreak", kind="scenario", hazard="tornado", weather="tornado_2011", rules=["tornado"],
         summary="Several tornado tracks (EF0-EF4) crossing the service area during a severe-weather day.",
         learned_from="Feb 2025 wind-phase damage behaviour; tornado paths use physics-based rules.",
-        notes=["Tornado tracks come from a real outbreak elsewhere, shifted onto this area."],
+        notes=["Tornado tracks come from a real outbreak elsewhere, shifted onto this area.",
+               "Tornado damage needs a large mutual-aid call: defaults to 50 local + 150 mutual-aid crews."],
+        default_crews=dict(crews=50, mutual_aid_crews=150),
     ),
     "snow_storm": dict(
         name="Snow storm", kind="scenario", hazard="snow", weather="snow_2009_12", snow_ice_equiv=0.08,
@@ -88,6 +90,11 @@ def tornado_tracks() -> list[dict]:
     return json.loads((WEATHER / "tornado_2011.json").read_text())
 
 
+def default_crews(sid: str) -> dict:
+    """Local + mutual-aid crews a scenario starts with (big events come with a bigger mutual-aid call)."""
+    return dict(crews=20, mutual_aid_crews=20) | SCENARIOS[sid].get("default_crews", {})
+
+
 def catalogue() -> list[dict]:
     out = []
     for sid, sc in SCENARIOS.items():
@@ -95,4 +102,4 @@ def catalogue() -> list[dict]:
     return out
 
 
-__all__ = ["SCENARIOS", "weather_for", "tornado_tracks", "catalogue", "POINTS"]
+__all__ = ["SCENARIOS", "weather_for", "tornado_tracks", "catalogue", "default_crews", "POINTS"]

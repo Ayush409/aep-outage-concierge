@@ -102,7 +102,9 @@ def frames(res: dict, step: int = 1) -> dict:
     a = g.assets
     dmg = [dict(t=_r(t), done=_r(f), lon=_r(a.lon.iloc[i], 4), lat=_r(a.lat.iloc[i], 4), type=a.asset_type.iloc[i])
            for i, t, f in zip(med["idx"], med["when"], med["finish"])]
-    return dict(hours=list(range(0, H, step)), start=res["time"][0],
+    return dict(hours=list(range(0, H, step)), start=res["time"][0], weather_hours=res["weather_hours"],
+                customers_out=int(cust[idx].sum()),  # this run's total (the cards match the map)
+                total=m.sum(axis=0).round().astype(int).tolist(),  # everyone out each hour, incl. hidden small areas
                 cells=[dict(cell=int(g.cells.index[k]), lon=_r(g.cells.lon.iloc[k], 4), lat=_r(g.cells.lat.iloc[k], 4))
                        for k in keep],
                 out=m[keep].round().astype(int).tolist(), damage=dmg)
@@ -135,7 +137,7 @@ def area_outages(res: dict, hour: float | None = None) -> dict:
         return dict(hour=0, zip=[], circuit=[])
     if hour is None:
         hour = float(np.argmax(med["curve"]))
-    out_now = med["out"] & (med["st"] <= hour) & (med["rest"] > hour)
+    out_now = med["out"] & (np.floor(med["st"]) <= hour) & (np.ceil(med["rest"]) > hour)  # same rule as frames()
     df = g.prem.assign(out=out_now * g.prem_customers)
     res_ = {}
     for key in ("zip", "circuit"):
