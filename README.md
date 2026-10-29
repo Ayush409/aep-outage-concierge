@@ -1,78 +1,135 @@
-# AEP HackOHI/O 2026 - AI Outage Concierge
+# AEP Outage Concierge
 
-A storm is coming to Roanoke, VA. Customers see their outage risk, how long restoration could take, what to do,
-and get alerts. AEP operators see risk, damage, % out by ZIP/circuit, the crew job plan, and business impact.
-Anyone can replay real local storms or drop famous storms onto Virginia and watch it play out in 3D.
+Built for HackOHI/O 2026 (AEP challenge).
 
-The design, data findings and modelling decisions are in [PLAN.md](PLAN.md).
+When a storm is coming, this app helps two groups of people:
 
-## Run it
+- **Households** see how likely they are to lose power, how long it might take to come back, and what to do
+  to get ready. They also get alerts before, during and after the outage.
+- **AEP staff** see where outages are likely, which repairs are needed, how many crews it would take, and what
+  the storm could cost.
 
-Requirements: Python 3.11+ and Node 20+.
+It covers the Roanoke, Virginia area, using AEP's own map of its power lines and real damage reports from past
+storms. You can also play out different storms (a snowstorm, a derecho, a tornado outbreak or an arctic freeze)
+and watch them on a 3D map.
+
+All numbers in the app are estimates from a model, not official AEP updates.
+
+## What you can do in it
+
+- See your home's outage risk (Low, Elevated, High or Severe) and a range for when power could return
+- Follow a checklist to prepare, and save a copy to use offline
+- Get alerts when a storm is coming, when power goes out, and when it comes back
+- (AEP staff) View an outage map, a repair plan, storm costs, and a storm simulator with adjustable settings
+- Ask questions in the built-in chat
+
+## Tech stack
+
+- **Website:** React, with MapLibre and deck.gl for the maps and 3D view
+- **Server:** Python and FastAPI, with a SQLite database
+- **Model and simulation:** NumPy, pandas, SciPy and scikit-learn
+- **Written explanations:** AI turns the model's numbers into plain-language messages
+- **Data:** AEP's map and damage data, plus weather from Open-Meteo
+
+## How to download and run it
+
+### 1. Install the tools
+
+- [Python](https://www.python.org/downloads/) 3.11 or newer
+- [Node.js](https://nodejs.org/) 20 or newer
+- [Git](https://git-scm.com/downloads)
+
+### 2. Download the project
 
 ```bash
+git clone https://github.com/Ayush409/aep-outage-concierge.git
+cd aep-outage-concierge
+```
+
+### 3. Set up Python
+
+Mac or Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Windows (PowerShell):
+
+```powershell
 python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements.txt
+.venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-Unzip the challenge data first (see [data/README.md](data/README.md) - into `data/extracted/`), then build the data and model (about 10 minutes, mostly the weather download):
+The commands below assume this environment is active. If you open a new terminal, run the `activate`
+line again first.
+
+### 4. Unzip the data
+
+Mac or Linux:
 
 ```bash
-.venv/Scripts/python scripts/export_damage.py
-.venv/Scripts/python scripts/prep_data.py
-.venv/Scripts/python scripts/fetch_weather.py
-.venv/Scripts/python scripts/train_model.py
-.venv/Scripts/python scripts/render_drawings.py
-.venv/Scripts/python scripts/seed_accounts.py
+mkdir -p data/extracted/Data1 data/extracted/Data2 data/extracted/matched_upstream
+unzip -n data/raw/Data1.zip -d data/extracted/Data1
+unzip -n data/raw/Data2.zip -d data/extracted/Data2
+unzip -n data/raw/matched_upstream.zip -d data/extracted/matched_upstream
 ```
 
-Start the API and the web app (two terminals):
+Windows (PowerShell):
+
+```powershell
+Expand-Archive data\raw\Data1.zip -DestinationPath data\extracted\Data1
+Expand-Archive data\raw\Data2.zip -DestinationPath data\extracted\Data2
+Expand-Archive data\raw\matched_upstream.zip -DestinationPath data\extracted\matched_upstream
+```
+
+### 5. Build the data and the model
+
+This takes about 10 minutes the first time, mostly downloading weather. Run these in order:
 
 ```bash
-.venv/Scripts/python -m uvicorn app.main:app --app-dir backend --port 8000
+python scripts/export_damage.py
+python scripts/prep_data.py
+python scripts/fetch_weather.py
+python scripts/train_model.py
+python scripts/render_drawings.py
+python scripts/seed_accounts.py
 ```
+
+### 6. Start the app
+
+Start the server:
 
 ```bash
-npm --prefix frontend install && npm --prefix frontend run dev
+python -m uvicorn app.main:app --app-dir backend --port 8000
 ```
 
-Open http://localhost:5173. Demo logins (customers and AEP operators) are listed at the top of
-`scripts/seed_accounts.py`. Optional settings (Claude API key, Twilio) go in `backend/.env` - see
-`backend/.env.example`.
+Then open a **second** terminal in the project folder and start the website:
 
-For a single-server build: `npm --prefix frontend run build`, then the API also serves the app on port 8000.
+```bash
+npm --prefix frontend install
+npm --prefix frontend run dev
+```
 
-## Customer demonstration
+Open **http://localhost:5173** in your browser.
 
-With `DEV_MODE=1`, the login page offers anonymous overhead, underground, and medical-needs demo households.
-Each creates a separate synthetic customer account. In My Status, start the storm journey and advance through
-preparation, outage, a revised estimate, and restoration. The repair-access slider reruns the model;
-the comparison and map use the same assumptions. Results may change only slightly or remain unchanged.
-Practice alerts respect in-app preferences, preserve history, and never send SMS.
+### 7. Sign in
 
-The preparation checklist saves progress per household and scenario. The Ready Plan download is a self-contained
-HTML file for offline use, with its calculation time and a stale-information notice. Address and declared needs
-are excluded unless explicitly selected. Downloaded copies remain on the device after account deletion.
+- Click **View the outage map anonymously** to look around without an account.
+- Or sign in with a demo customer or AEP staff account. The logins and password are listed at the top of
+  `scripts/seed_accounts.py`.
 
-Set `AI_ENABLED=0` in the backend environment to disable Claude calls and use template responses.
-This does not disable account/checklist storage. The underlying risk model remains experimental:
-its bands are planning indicators, not validated outage probabilities. No live utility-confirmation feed is connected.
+### Optional settings
 
-Checks: `python -m unittest discover -s tests` and
-`node --test frontend/src/components/timeline.test.js frontend/src/components/offlinePlan.test.js`.
+Copy `backend/.env.example` to `backend/.env` to add optional settings, such as an AI key for written
+messages or a Twilio account for real text messages. The app works without them; it uses standard message
+templates and simulated texts instead.
 
-## Project layout
+## More detail
 
-| Path | What |
-|---|---|
-| `scripts/` | Data prep, weather download, model training, demo accounts |
-| `backend/app/engines/` | Risk model, structure-drawing repair kits, crew scheduling + Monte Carlo restoration, costs, scenarios |
-| `backend/app/main.py` | API: auth, customer and AEP (role-checked) routes, alerts |
-| `backend/app/ai.py` | Claude-written explanations/messages from engine facts only; template fallback |
-| `frontend/src/pages/` | Customer tabs, AEP tabs, 3D simulation |
-
-## Source data
-
-- [`data/`](data/README.md): original GIS and upstream-topology archives, labor-hour workbook.
-- [`docs/HackOHIO_2026_AI_Outage_Concierge_Challenge.docx`](docs/HackOHIO_2026_AI_Outage_Concierge_Challenge.docx): challenge requirements.
-- [`docs/structure_drawings.pdf`](docs/structure_drawings.pdf): sample distribution structure diagrams.
+- [docs/technical-notes.md](docs/technical-notes.md): demo walkthrough, tests and how the code is organized
+- [PLAN.md](PLAN.md): design, data findings and modelling decisions
+- [data/README.md](data/README.md): what is in the challenge data
